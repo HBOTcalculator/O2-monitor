@@ -77,7 +77,8 @@ button:disabled{opacity:.5;cursor:default}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px}
 .row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
-.seg button{border:none;border-radius:0;min-height:36px;padding:6px 11px;font-size:.82rem;background:transparent}
+.seg button{border:none;border-radius:0;min-height:36px;padding:6px 9px;font-size:.82rem;background:transparent;white-space:nowrap}
+.rangebar{flex:1 1 100%;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0}
 .seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
 canvas{width:100%;display:block}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.8rem;color:var(--muted)}
@@ -87,7 +88,7 @@ canvas{width:100%;display:block}
 .gr{display:flex;flex-direction:column;gap:2px}
 .gv{font:600 clamp(1.7rem,8.5vw,2.6rem)/1 var(--display);font-variant-numeric:tabular-nums;color:var(--accent);letter-spacing:-.02em}
 .gv.co2-v{color:var(--co2)}
-.rec{margin-left:auto;min-height:38px;padding:6px 12px;font-size:.85rem;color:var(--alarm);border-color:var(--alarm)}
+.rec{margin-left:auto;min-height:36px;padding:4px 8px;font-size:.74rem;line-height:1.15;white-space:nowrap;flex:none;color:var(--alarm);border-color:var(--alarm)}
 .rec.start{color:var(--panel);background:var(--ok);border-color:var(--ok)}
 .gr.next{margin-left:auto;align-items:flex-end}
 .nv{font:600 1.35rem/1.15 var(--display);font-variant-numeric:tabular-nums;color:var(--ink)}
@@ -118,7 +119,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 <body>
 <main>
   <header>
-    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v10</span></h1>
+    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v11</span></h1>
     <p class="sub">Vernier Go Direct O₂ corrected by Aranet4 barometric pressure. Logs once per minute.</p>
   </header>
 
@@ -172,6 +173,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
         <div class="gr"><span class="label">CO₂</span><span class="gv co2-v" id="gCO2">—<small>ppm</small></span></div>
         <div class="gr next"><span class="label">Next in</span><span class="nv" id="countdown">—</span></div>
       </div>
+      <div class="rangebar">
       <div class="seg" id="range" role="group" aria-label="Time range">
         <button type="button" data-h="1" aria-pressed="false">1 h</button>
         <button type="button" data-h="2" aria-pressed="false">2 h</button>
@@ -180,6 +182,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
         <button type="button" data-h="0" aria-pressed="false">All</button>
       </div>
       <button id="recBtn" type="button" class="rec">■ Stop &amp; save</button>
+      </div>
     </div>
     <canvas id="chart" height="460" style="touch-action:pan-y" aria-label="Actual oxygen percent, pressure and carbon dioxide over time"></canvas>
     <div class="legend">
@@ -227,7 +230,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 const $ = id => document.getElementById(id);
 const STD_ATM_KPA = 101.325;
 const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1';
-const APP_VERSION = '10';
+const APP_VERSION = '11';
 const ARANET_SERVICES = ['0000fce0-0000-1000-8000-00805f9b34fb', 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
 const ARANET_READINGS = 'f0cd3001-95da-4f4b-9ac8-aa55d312af0c';
 const VERNIER_SERVICE = 'd91714ef-28b9-4f91-ba16-f0d9a604f112';
@@ -790,7 +793,8 @@ function draw(){
 
   if (!rows.length){
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '13px ' + css('--body');
-    ctx.fillText(log.length ? 'No readings in this time window' : 'Readings appear here once both sensors are connected', L + pw/2, top1 + h1/2);
+    ctx.font = '12px ' + css('--body');
+    ctx.fillText(log.length ? 'No readings in this time window' : 'Waiting for the first reading', L + pw/2, top1 + h1/2);
     updatePanUI(t0, t1);
     return;
   }
