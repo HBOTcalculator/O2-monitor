@@ -85,8 +85,11 @@ canvas{width:100%;display:block}
 
 .gread{display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap}
 .gr{display:flex;flex-direction:column;gap:2px}
-.gv{font:600 clamp(1.9rem,9vw,2.6rem)/1 var(--display);font-variant-numeric:tabular-nums;color:var(--accent);letter-spacing:-.02em}
+.gv{font:600 clamp(1.7rem,8.5vw,2.6rem)/1 var(--display);font-variant-numeric:tabular-nums;color:var(--accent);letter-spacing:-.02em}
 .gv.co2-v{color:var(--co2)}
+.gr.next{margin-left:auto;align-items:flex-end}
+.nv{font:600 1.35rem/1.15 var(--display);font-variant-numeric:tabular-nums;color:var(--ink)}
+.gread{flex:1 1 100%;min-width:0;flex-wrap:nowrap;gap:14px}
 .gv small{font-size:.45em;color:var(--muted);font-weight:400;margin-left:3px;letter-spacing:0}
 .pan{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .pan button{min-height:38px;padding:6px 12px;font-size:.85rem}
@@ -113,7 +116,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 <body>
 <main>
   <header>
-    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v7</span></h1>
+    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v8</span></h1>
     <p class="sub">Vernier Go Direct O₂ corrected by Aranet4 barometric pressure. Logs once per minute.</p>
   </header>
 
@@ -157,7 +160,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
       <div class="kv"><span class="label">Carbon dioxide</span><span class="v co2-v" id="co2">— <small>ppm</small></span></div>
       <div class="kv"><span class="label">Vernier raw reading</span><span class="v" id="o2Raw">— <small>%</small></span></div>
     </div>
-    <div class="stamp"><span id="stamp">Waiting for both sensors</span><span id="countdown"></span></div>
+    <div class="stamp"><span id="stamp">Waiting for both sensors</span></div>
   </section>
 
   <section class="card" aria-label="Graph">
@@ -165,6 +168,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
       <div class="gread" aria-live="polite">
         <div class="gr"><span class="label">Actual O₂</span><span class="gv" id="gO2">—<small>%</small></span></div>
         <div class="gr"><span class="label">CO₂</span><span class="gv co2-v" id="gCO2">—<small>ppm</small></span></div>
+        <div class="gr next"><span class="label">Next in</span><span class="nv" id="countdown">—</span></div>
       </div>
       <div class="seg" id="range" role="group" aria-label="Time range">
         <button type="button" data-h="1" aria-pressed="false">1 h</button>
@@ -218,7 +222,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 const $ = id => document.getElementById(id);
 const STD_ATM_KPA = 101.325;
 const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1';
-const APP_VERSION = '7';
+const APP_VERSION = '8';
 const ARANET_SERVICES = ['0000fce0-0000-1000-8000-00805f9b34fb', 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
 const ARANET_READINGS = 'f0cd3001-95da-4f4b-9ac8-aa55d312af0c';
 const VERNIER_SERVICE = 'd91714ef-28b9-4f91-ba16-f0d9a604f112';
@@ -584,7 +588,7 @@ let nextTick = Math.ceil(Date.now() / 60000) * 60000;
 async function tick(){
   const now = Date.now();
   const secs = Math.max(0, Math.round((nextTick - now)/1000));
-  $('countdown').textContent = (vDevice || aranet || DEMO) ? `Next reading in ${secs} s` : '';
+  $('countdown').textContent = (vDevice || aranet || DEMO) ? `${secs} s` : '—';
   updateAranetStatus();
   if (now < nextTick) return;
   nextTick = Math.ceil((now + 1) / 60000) * 60000;
@@ -660,8 +664,8 @@ function draw(){
   const rows = log.filter(r => r.t >= t0 - 5*60e3 && r.t <= t1 + 5*60e3);
   const inView = rows.filter(r => r.t >= t0 && r.t <= t1);
 
-  const L = 46, R = 50, gap = 26;
-  const top1 = 10, h1 = 160, top2 = top1 + h1 + gap, h2 = 100, top3 = top2 + h2 + gap, h3 = H - top3 - 24;
+  const L = 46, R = 50, gap = 30;
+  const top1 = 10, h1 = 156, top2 = top1 + h1 + gap, h2 = 98, top3 = top2 + h2 + gap, h3 = H - top3 - 24;
   const pw = W - L - R;
   const xOf = t => L + (t - t0) / span * pw;
 
@@ -699,6 +703,11 @@ function draw(){
   ctx.strokeStyle = ink; ctx.globalAlpha = .6; ctx.beginPath(); ctx.moveTo(L, yO(20.9)); ctx.lineTo(L+pw, yO(20.9)); ctx.stroke(); ctx.globalAlpha = 1;
   ctx.fillStyle = ink; ctx.fillText('20.9', L+pw+4, yO(20.9));
   ctx.setLineDash([]);
+
+  // solid dividers between the three graphs
+  ctx.strokeStyle = css('--ink'); ctx.globalAlpha = .45; ctx.lineWidth = 1.5;
+  [top2 - gap / 2, top3 - gap / 2].forEach(y => { y = Math.round(y) + .5; ctx.beginPath(); ctx.moveTo(4, y); ctx.lineTo(W - 4, y); ctx.stroke(); });
+  ctx.globalAlpha = 1; ctx.lineWidth = 1;
 
   // x labels
   ctx.fillStyle = ink; ctx.textBaseline = 'top';
