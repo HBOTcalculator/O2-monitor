@@ -28,6 +28,7 @@
   --accent:#4fb8d6; --accent-soft:#16343f; --press:#d9b45a;
   --ok:#4cc58a; --warn:#e3a33a; --alarm:#ff4d55; --alarm-ink:#1a0003; color-scheme:dark }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{margin:0}
 body{background:var(--bg);color:var(--ink);font:15px/1.45 var(--body);
   padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
@@ -86,6 +87,11 @@ canvas{width:100%;display:block}
 .note{font-size:.8rem;color:var(--muted);margin:0;max-width:65ch}
 .msg{font-size:.85rem;color:var(--warn);margin:0;min-height:1.2em}
 .formula{font:.8rem var(--display);color:var(--muted);background:var(--bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+.check{display:flex;align-items:center;gap:8px;font-size:.85rem;color:var(--muted)}
+.check input{width:20px;height:20px;accent-color:var(--accent)}
+.diag summary{cursor:pointer}
+.diag ol{margin:0;padding:0;list-style:none;font:.75rem/1.5 var(--display);color:var(--muted);max-height:220px;overflow:auto;overflow-wrap:anywhere}
+.diag li.bad{color:var(--alarm)}
 textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px}
 @media (max-width:520px){
   .devices{grid-template-columns:1fr}
@@ -96,7 +102,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 <body>
 <main>
   <header>
-    <h1>ALTITUDE O₂ MONITOR</h1>
+    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v3</span></h1>
     <p class="sub">Vernier Go Direct O₂ corrected by Aranet4 barometric pressure. Logs once per minute.</p>
   </header>
 
@@ -117,7 +123,12 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
       <button id="aBtn" class="primary" type="button">Connect Aranet4</button>
     </div>
   </section>
+  <label class="check" for="showAll"><input id="showAll" type="checkbox"> Show all nearby devices in the list (use if your sensor doesn't appear)</label>
   <p class="msg" id="msg" role="status"></p>
+  <details class="card diag" id="diag" open>
+    <summary class="label">Connection log</summary>
+    <ol id="diagList"></ol>
+  </details>
 
   <section class="hero" aria-label="Current readings">
     <div>
@@ -179,7 +190,8 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 const $ = id => document.getElementById(id);
 const STD_ATM_KPA = 101.325;
 const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1';
-const ARANET_SERVICES = [0xfce0, 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
+const APP_VERSION = '3';
+const ARANET_SERVICES = ['0000fce0-0000-1000-8000-00805f9b34fb', 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
 const ARANET_READINGS = 'f0cd3001-95da-4f4b-9ac8-aa55d312af0c';
 const VERNIER_SERVICE = 'd91714ef-28b9-4f91-ba16-f0d9a604f112';
 const DEMO = /[?&]demo\b/.test(location.search);
@@ -202,6 +214,19 @@ $('limit').value = settings.limit; $('refP').value = settings.refP.toFixed(3);
 const save = () => { try { localStorage.setItem(STORE, JSON.stringify(log)); } catch(e) {} };
 const saveSettings = () => { try { localStorage.setItem(SETTINGS, JSON.stringify(settings)); } catch(e) {} };
 const msg = t => { $('msg').textContent = t || ''; };
+function dlog(text, bad){
+  const li = document.createElement('li');
+  li.textContent = new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'}) + '  ' + text;
+  if (bad) li.className = 'bad';
+  $('diagList').appendChild(li);
+  while ($('diagList').children.length > 60) $('diagList').firstChild.remove();
+}
+(async () => {
+  dlog(`App version ${APP_VERSION}`);
+  dlog('Bluetooth API: ' + (navigator.bluetooth ? 'present' : 'MISSING (use Bluefy)'), !navigator.bluetooth);
+  dlog('Vernier library: ' + (window.godirect ? 'loaded' : 'NOT loaded'), !window.godirect);
+  try { if (navigator.bluetooth && navigator.bluetooth.getAvailability) { const ok = await navigator.bluetooth.getAvailability(); dlog('Bluetooth available: ' + (ok ? 'yes' : 'NO — check Bluetooth is on and Bluefy is allowed in Settings'), !ok); } } catch(e) {}
+})();
 
 // ---------- physics ----------
 function compute(raw, kpa){
@@ -279,17 +304,76 @@ function pickO2Sensor(dev){
       || s.find(x => /%/.test(x.unit))
       || s.find(x => x.enabled) || s[0];
 }
+// Our own Go Direct Bluetooth adapter. Vernier's built-in one matches characteristic
+// UUIDs by exact lowercase text, which fails in iOS browsers (Bluefy) that report them
+// in uppercase. Here each characteristic is requested by UUID instead.
+const GDX_COMMAND = 'f4bf14a6-c7d5-4b6d-8aa8-df1a7c83adcb';
+const GDX_RESPONSE = 'b41e6675-a329-40e0-aa01-44d2f444babe';
+function makeVernierAdapter(bt){
+  return {
+    godirectAdapter: true,
+    maxPacketLength: 20,
+    deviceCommand: null,
+    deviceResponse: null,
+    async setup({ onClosed, onResponse }){
+      bt.addEventListener('gattserverdisconnected', onClosed);
+      const server = await bt.gatt.connect();
+      dlog('Vernier: Bluetooth connected');
+      const service = await server.getPrimaryService(VERNIER_SERVICE);
+      dlog('Vernier: Go Direct service found');
+      let cmd, rsp;
+      try {
+        cmd = await service.getCharacteristic(GDX_COMMAND);
+        rsp = await service.getCharacteristic(GDX_RESPONSE);
+      } catch(e) {
+        dlog(`Vernier: direct lookup failed (${e.name || ''} ${e.message || e}), scanning list…`);
+        const list = await service.getCharacteristics();
+        dlog('Vernier: characteristics ' + list.map(c => c.uuid).join(', '));
+        cmd = list.find(c => String(c.uuid).toLowerCase() === GDX_COMMAND);
+        rsp = list.find(c => String(c.uuid).toLowerCase() === GDX_RESPONSE);
+      }
+      if (!cmd || !rsp) throw new Error('Go Direct command/response channels not found');
+      this.deviceCommand = cmd; this.deviceResponse = rsp;
+      rsp.addEventListener('characteristicvaluechanged', ev => onResponse(ev.target.value));
+      await rsp.startNotifications();
+      dlog('Vernier: notifications on');
+    },
+    writeCommand(buf){ return this.deviceCommand.writeValue(buf); },
+    async close(){ return bt.gatt.disconnect(); }
+  };
+}
+function chooser(namePrefix, services){
+  const all = $('showAll').checked;
+  dlog(`Opening device list (${all ? 'all nearby devices' : 'names starting "' + namePrefix + '"'})`);
+  return navigator.bluetooth.requestDevice(all
+    ? { acceptAllDevices:true, optionalServices:services }
+    : { filters:[{namePrefix}], optionalServices:services });
+}
+function explain(e, who){
+  const n = e && e.name, m = (e && e.message) || String(e);
+  dlog(`${who} error: ${n || 'Error'}: ${m}`, true);
+  if (n === 'NotFoundError') return `${who}: nothing selected. If the sensor wasn't in the list, check it's switched on and not connected to another app, or tick "Show all nearby devices" and look for it there.`;
+  if (n === 'SecurityError' || n === 'NotAllowedError') return `${who}: Bluetooth permission was refused. Open iPhone Settings › Bluefy and turn Bluetooth on, then reload this page.`;
+  if (n === 'NetworkError') return `${who}: the sensor didn't accept the connection. It may still be connected to another app; close that app, or turn the sensor off and on, and try again.`;
+  return `${who}: ${m}`;
+}
 async function connectVernier(){
   unlockAudio(); msg('');
-  if (!navigator.bluetooth) { msg('This browser has no Bluetooth access. On iPhone, open this page in the Bluefy browser.'); return; }
-  if (!window.godirect) { msg('The Vernier library did not load. Check your internet connection and reload.'); return; }
+  if (!navigator.bluetooth) { msg('This browser has no Bluetooth access. On iPhone, open this page in the Bluefy browser.'); dlog('navigator.bluetooth missing', true); return; }
+  if (!window.godirect) { msg('The Vernier library did not load. Check your internet connection and reload.'); dlog('Vernier library missing', true); return; }
+  let bt = null;
   try {
     $('vDot').className = 'dot wait'; $('vDetail').textContent = 'Choose your GDX-O2 in the list…';
-    const bt = await navigator.bluetooth.requestDevice({ filters:[{namePrefix:'GDX'}], optionalServices:[VERNIER_SERVICE] });
+    bt = await chooser('GDX', [VERNIER_SERVICE]);
+    dlog(`Vernier: picked "${bt.name || 'unnamed'}"`);
     $('vDetail').textContent = 'Connecting…';
-    const dev = await godirect.createDevice(bt, { open:true, startMeasurements:false });
+    const dev = await godirect.createDevice(makeVernierAdapter(bt), { open:false });
+    dlog('Vernier: opening Go Direct session…');
+    await dev.open(false);
+    dlog(`Vernier: open. Sensors: ${dev.sensors.map(x => x.number + ':' + x.name + ' (' + x.unit + ')').join(', ') || 'none'}`);
     dev.keepValues = false;
     const s = pickO2Sensor(dev);
+    if (!s) throw new Error('No sensor channels reported by the device');
     dev.sensors.forEach(x => { if (x !== s && x.enabled) x.setEnabled(false); });
     s.setEnabled(true);
     s.on('value-changed', sensor => onVernierValue(sensor.value));
@@ -303,7 +387,8 @@ async function connectVernier(){
   } catch(e) {
     $('vDot').className = vDevice ? 'dot on' : 'dot';
     $('vDetail').textContent = vDevice ? $('vDetail').textContent : 'Not connected';
-    if (e && e.name !== 'NotFoundError') msg('Vernier: ' + (e.message || e) + '. Close Graphical Analysis so it releases the sensor, then try again.');
+    if (bt && !vDevice) { try { bt.gatt.disconnect(); dlog('Vernier: released the sensor after the failed attempt'); } catch(_) {} }
+    msg(explain(e, 'Vernier'));
   }
 }
 function onVernierValue(v){
@@ -318,18 +403,24 @@ function onVernierValue(v){
 // ---------- Aranet4 ----------
 async function getAranetChar(server){
   for (const svc of ARANET_SERVICES){
-    try { const s = await server.getPrimaryService(svc); return await s.getCharacteristic(ARANET_READINGS); } catch(e) {}
+    try {
+      const s = await server.getPrimaryService(svc);
+      dlog(`Aranet4: found service ${svc.slice(0,8)}`);
+      return await s.getCharacteristic(ARANET_READINGS);
+    } catch(e) { dlog(`Aranet4: service ${svc.slice(0,8)}: ${e.name || ''} ${e.message || e}`); }
   }
   throw new Error('Aranet4 readings service not found');
 }
 async function connectAranet(){
   unlockAudio(); msg('');
-  if (!navigator.bluetooth) { msg('This browser has no Bluetooth access. On iPhone, open this page in the Bluefy browser.'); return; }
+  if (!navigator.bluetooth) { msg('This browser has no Bluetooth access. On iPhone, open this page in the Bluefy browser.'); dlog('navigator.bluetooth missing', true); return; }
   try {
     $('aDot').className = 'dot wait'; $('aDetail').textContent = 'Choose your Aranet4 in the list…';
-    const device = await navigator.bluetooth.requestDevice({ filters:[{namePrefix:'Aranet4'}], optionalServices: ARANET_SERVICES });
+    const device = await chooser('Aranet', ARANET_SERVICES);
+    dlog(`Aranet4: picked "${device.name || 'unnamed'}"`);
     $('aDetail').textContent = 'Connecting… (iOS may ask for the PIN shown on the Aranet4 screen)';
     const server = await device.gatt.connect();
+    dlog('Aranet4: connected, looking for readings…');
     const ch = await getAranetChar(server);
     aranet = { device, char: ch };
     device.addEventListener('gattserverdisconnected', () => { $('aDot').className = 'dot wait'; $('aDetail').textContent = 'Connection dropped. Reconnecting at next reading…'; });
@@ -340,7 +431,7 @@ async function connectAranet(){
   } catch(e) {
     $('aDot').className = aranet ? 'dot wait' : 'dot';
     if (!aranet) $('aDetail').textContent = 'Not connected';
-    if (e && e.name !== 'NotFoundError') msg('Aranet4: ' + (e.message || e) + '. Make sure Aranet Home is closed, then try again.');
+    msg(explain(e, 'Aranet4'));
   }
 }
 async function readAranet(){
