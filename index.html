@@ -13,7 +13,7 @@
 /* Layout: one column instrument panel — status strip, four readouts, chart, log controls */
 :root{
   --bg:#eef2f4; --panel:#ffffff; --ink:#14232b; --muted:#5b6d76; --line:#d3dde2;
-  --accent:#0b6f8a; --accent-soft:#d8ecf2; --press:#7a5a12;
+  --accent:#0b6f8a; --accent-soft:#d8ecf2; --press:#7a5a12; --co2:#6a4c9c;
   --ok:#1d7a4c; --warn:#a86a00; --alarm:#c4242b; --alarm-ink:#ffffff;
   --display:"Chivo Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --body:"Public Sans", -apple-system, "Helvetica Neue", Arial, sans-serif;
@@ -21,11 +21,11 @@
 }
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
   --bg:#0d161b; --panel:#152229; --ink:#e3edf1; --muted:#8fa3ad; --line:#26363e;
-  --accent:#4fb8d6; --accent-soft:#16343f; --press:#d9b45a;
+  --accent:#4fb8d6; --accent-soft:#16343f; --press:#d9b45a; --co2:#b9a2e6;
   --ok:#4cc58a; --warn:#e3a33a; --alarm:#ff4d55; --alarm-ink:#1a0003; color-scheme:dark }}
 :root[data-theme="dark"]{
   --bg:#0d161b; --panel:#152229; --ink:#e3edf1; --muted:#8fa3ad; --line:#26363e;
-  --accent:#4fb8d6; --accent-soft:#16343f; --press:#d9b45a;
+  --accent:#4fb8d6; --accent-soft:#16343f; --press:#d9b45a; --co2:#b9a2e6;
   --ok:#4cc58a; --warn:#e3a33a; --alarm:#ff4d55; --alarm-ink:#1a0003; color-scheme:dark }
 *{box-sizing:border-box}
 [hidden]{display:none!important}
@@ -61,7 +61,7 @@ button:disabled{opacity:.5;cursor:default}
 .kv .v{font:600 1.35rem/1.15 var(--display);font-variant-numeric:tabular-nums}
 .kv .v small{font-size:.65em;color:var(--muted);font-weight:400}
 .stamp{grid-column:1/-1;color:var(--muted);font-size:.8rem;border-top:1px solid var(--line);padding-top:10px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
-.press-v{color:var(--press)}
+.press-v{color:var(--press)} .co2-v{color:var(--co2)}
 
 /* alarm */
 .alarm{background:var(--alarm);color:var(--alarm-ink);border-radius:12px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;animation:pulse 1s steps(2,end) infinite}
@@ -102,7 +102,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 <body>
 <main>
   <header>
-    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v3</span></h1>
+    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v4</span></h1>
     <p class="sub">Vernier Go Direct O₂ corrected by Aranet4 barometric pressure. Logs once per minute.</p>
   </header>
 
@@ -138,6 +138,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
     <div class="side">
       <div class="kv"><span class="label">Pressure</span><span class="v press-v" id="pAtm">— <small>atm</small></span></div>
       <div class="kv"><span class="label">O₂ partial pressure</span><span class="v" id="pO2">— <small>atm</small></span></div>
+      <div class="kv"><span class="label">Carbon dioxide</span><span class="v co2-v" id="co2">— <small>ppm</small></span></div>
       <div class="kv"><span class="label">Vernier raw reading</span><span class="v" id="o2Raw">— <small>%</small></span></div>
     </div>
     <div class="stamp"><span id="stamp">Waiting for both sensors</span><span id="countdown"></span></div>
@@ -153,10 +154,11 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
         <button type="button" data-h="0" aria-pressed="false">All</button>
       </div>
     </div>
-    <canvas id="chart" height="320" aria-label="Actual oxygen percent and pressure over time"></canvas>
+    <canvas id="chart" height="460" aria-label="Actual oxygen percent, pressure and carbon dioxide over time"></canvas>
     <div class="legend">
       <span><i style="background:var(--accent)"></i>Actual O₂ %</span>
       <span><i style="background:var(--press)"></i>Pressure, atm</span>
+      <span><i style="background:var(--co2)"></i>CO₂, ppm</span>
       <span><i style="background:var(--alarm)"></i>Alarm limit</span>
     </div>
   </section>
@@ -190,7 +192,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 const $ = id => document.getElementById(id);
 const STD_ATM_KPA = 101.325;
 const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1';
-const APP_VERSION = '3';
+const APP_VERSION = '4';
 const ARANET_SERVICES = ['0000fce0-0000-1000-8000-00805f9b34fb', 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
 const ARANET_READINGS = 'f0cd3001-95da-4f4b-9ac8-aa55d312af0c';
 const VERNIER_SERVICE = 'd91714ef-28b9-4f91-ba16-f0d9a604f112';
@@ -246,7 +248,7 @@ function decodeAranet(dv){
   const interval = dv.byteLength >= 11 ? dv.getUint16(9, true) : null;
   const ago = dv.byteLength >= 13 ? dv.getUint16(11, true) : null;
   const pValid = (pRaw >> 15) === 0;
-  return { co2, tempC: tRaw / 20, hPa: pValid ? pRaw / 10 : null, rh, batt, interval, ago };
+  return { co2: (co2 >> 15) ? null : co2, tempC: tRaw / 20, hPa: pValid ? pRaw / 10 : null, rh, batt, interval, ago };
 }
 
 // ---------- audio / wake ----------
@@ -444,6 +446,7 @@ async function readAranet(){
     const d = decodeAranet(await aranet.char.readValue());
     if (d.hPa != null) aranet.kpa = d.hPa / 10;
     Object.assign(aranet, { tempC:d.tempC, rh:d.rh, co2:d.co2, at:Date.now(), interval:d.interval, ago:d.ago });
+    if (d.co2 != null) $('co2').innerHTML = `${d.co2} <small>ppm</small>`;
     $('aDot').className = 'dot on';
     const iv = d.interval ? ` · updates every ${Math.round(d.interval/60)} min` : '';
     $('aDetail').textContent = `${(aranet.kpa||0).toFixed(2)} kPa · ${d.tempC.toFixed(1)} °C · ${d.rh}% RH${iv}`;
@@ -471,7 +474,7 @@ async function tick(){
   const raw = fresh.reduce((a,b)=>a+b,0) / fresh.length;
   const kpa = aranet.kpa;
   const c = compute(raw, kpa);
-  const row = { t: now, raw, kpa, actual: c.actual, po2Atm: c.po2Atm, tempC: aranet.tempC, rh: aranet.rh };
+  const row = { t: now, raw, kpa, actual: c.actual, po2Atm: c.po2Atm, tempC: aranet.tempC, rh: aranet.rh, co2: aranet.co2 ?? null };
   log.push(row); save();
   showRow(row); checkAlarm(c.actual); draw();
 }
@@ -483,6 +486,7 @@ function showRow(r){
   $('pAtm').innerHTML = `${pAtm.toFixed(3)} <small>atm</small>`;
   $('pO2').innerHTML = `${r.po2Atm.toFixed(3)} <small>atm · ${(r.po2Atm*STD_ATM_KPA).toFixed(1)} kPa</small>`;
   $('o2Raw').innerHTML = `${r.raw.toFixed(2)} <small>%</small>`;
+  if (r.co2 != null) $('co2').innerHTML = `${r.co2} <small>ppm</small>`;
   $('stamp').textContent = 'Last reading ' + new Date(r.t).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
   $('logCount').textContent = `${log.length} reading${log.length===1?'':'s'}` + (log.length ? ` since ${new Date(log[0].t).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})}` : '');
 }
@@ -491,10 +495,10 @@ function showRow(r){
 function css(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function draw(){
   const cv = $('chart'), dpr = window.devicePixelRatio || 1;
-  const W = cv.clientWidth, H = 320;
+  const W = cv.clientWidth, H = 460;
   cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + 'px';
   const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
-  const ink = css('--muted'), line = css('--line'), acc = css('--accent'), prs = css('--press'), alm = css('--alarm');
+  const ink = css('--muted'), line = css('--line'), acc = css('--accent'), prs = css('--press'), alm = css('--alarm'), cc = css('--co2');
   const font = '11px ' + css('--display');
   ctx.font = font;
 
@@ -505,7 +509,7 @@ function draw(){
   const span = Math.max(t1 - t0, 60e3);
 
   const L = 44, R = 50, gap = 26;
-  const top1 = 10, h1 = 168, top2 = top1 + h1 + gap, h2 = H - top2 - 24;
+  const top1 = 10, h1 = 160, top2 = top1 + h1 + gap, h2 = 100, top3 = top2 + h2 + gap, h3 = H - top3 - 24;
   const pw = W - L - R;
   const xOf = t => L + (t - t0) / span * pw;
 
@@ -519,6 +523,12 @@ function draw(){
   if (!isFinite(pMin)) { pMin = 0.74; pMax = 0.76; }
   const pPad = Math.max(0.002, (pMax - pMin) * 0.15); pMin -= pPad; pMax += pPad;
   const yP = v => top2 + h2 - (v - pMin) / (pMax - pMin) * h2;
+  // CO2 scale (ppm)
+  let cMin = Infinity, cMax = -Infinity;
+  rows.forEach(r => { if (r.co2 != null) { cMin = Math.min(cMin, r.co2); cMax = Math.max(cMax, r.co2); } });
+  if (!isFinite(cMin)) { cMin = 400; cMax = 800; }
+  cMin = Math.max(0, Math.floor(cMin / 100) * 100 - 100); cMax = cMin + Math.max(400, Math.ceil((cMax + 100 - cMin) / 400) * 400);
+  const yC = v => top3 + h3 - (v - cMin) / (cMax - cMin) * h3;
 
   // grid + y labels
   ctx.strokeStyle = line; ctx.fillStyle = ink; ctx.lineWidth = 1; ctx.textBaseline = 'middle';
@@ -527,9 +537,11 @@ function draw(){
   for (let v = Math.ceil(oMin); v <= oMax; v += oStep){ const y = Math.round(yO(v))+.5; ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(L+pw,y); ctx.stroke(); ctx.fillText(v + '%', L-6, y); }
   const pTicks = 4;
   for (let i = 0; i <= pTicks; i++){ const v = pMin + (pMax-pMin)*i/pTicks; const y = Math.round(yP(v))+.5; ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(L+pw,y); ctx.stroke(); ctx.fillText(v.toFixed(3), L-6, y); }
+  for (let i = 0; i <= 4; i++){ const v = cMin + (cMax-cMin)*i/4; const y = Math.round(yC(v))+.5; ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(L+pw,y); ctx.stroke(); ctx.fillText(String(Math.round(v)), L-6, y); }
   // panel titles
   ctx.textAlign = 'left'; ctx.fillStyle = acc; ctx.fillText('O₂ %', L+4, top1+8);
   ctx.fillStyle = prs; ctx.fillText('atm', L+4, top2+8);
+  ctx.fillStyle = cc; ctx.fillText('CO₂ ppm', L+4, top3+8);
 
   // limit + 20.9 reference
   ctx.setLineDash([5,4]);
@@ -557,12 +569,14 @@ function draw(){
   const series = (yf, val, color) => {
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.beginPath();
     let prevT = null;
-    rows.forEach(r => { const x = xOf(r.t), y = yf(val(r)); if (prevT == null || r.t - prevT > 5*60e3) ctx.moveTo(x,y); else ctx.lineTo(x,y); prevT = r.t; });
+    let last = null;
+    rows.forEach(r => { const v = val(r); if (v == null) { prevT = null; return; } const x = xOf(r.t), y = yf(v); if (prevT == null || r.t - prevT > 5*60e3) ctx.moveTo(x,y); else ctx.lineTo(x,y); prevT = r.t; last = r; });
     ctx.stroke();
-    const last = rows[rows.length-1]; ctx.fillStyle = color; ctx.beginPath(); ctx.arc(xOf(last.t), yf(val(last)), 3.5, 0, 7); ctx.fill();
+    if (last) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(xOf(last.t), yf(val(last)), 3.5, 0, 7); ctx.fill(); }
   };
   series(yO, r => r.actual, acc);
   series(yP, r => r.kpa / STD_ATM_KPA, prs);
+  series(yC, r => r.co2 ?? null, cc);
 }
 window.addEventListener('resize', draw);
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', draw);
@@ -575,13 +589,13 @@ $('range').addEventListener('click', e => {
 
 // ---------- CSV ----------
 function csv(){
-  const head = 'timestamp_iso,local_time,vernier_raw_o2_pct,pressure_kpa,pressure_atm,o2_partial_pressure_atm,o2_partial_pressure_kpa,actual_o2_pct,aranet_temp_c,aranet_rh_pct';
+  const head = 'timestamp_iso,local_time,vernier_raw_o2_pct,pressure_kpa,pressure_atm,o2_partial_pressure_atm,o2_partial_pressure_kpa,actual_o2_pct,aranet_temp_c,aranet_rh_pct,co2_ppm';
   const lines = log.map(r => [
     new Date(r.t).toISOString(),
     '"' + new Date(r.t).toLocaleString() + '"',
     r.raw.toFixed(3), r.kpa.toFixed(2), (r.kpa/STD_ATM_KPA).toFixed(4),
     r.po2Atm.toFixed(4), (r.po2Atm*STD_ATM_KPA).toFixed(2), r.actual.toFixed(2),
-    r.tempC != null ? r.tempC.toFixed(1) : '', r.rh != null ? r.rh : ''
+    r.tempC != null ? r.tempC.toFixed(1) : '', r.rh != null ? r.rh : '', r.co2 != null ? r.co2 : ''
   ].join(','));
   return [head, ...lines].join('\n') + '\n';
 }
@@ -624,7 +638,7 @@ if (DEMO){
     const kpa = 75.9 + 0.25*Math.sin(i/90);
     const raw = 20.9 * (kpa/STD_ATM_KPA) + (i < 40 ? (40-i)*0.03 : 0) + (Math.random()-.5)*0.05;
     const c = compute(raw, kpa);
-    log.push({t: t - i*60e3, raw, kpa, actual:c.actual, po2Atm:c.po2Atm, tempC:21.4, rh:28});
+    log.push({t: t - i*60e3, raw, kpa, actual:c.actual, po2Atm:c.po2Atm, tempC:21.4, rh:28, co2: Math.round(520 + 180*Math.sin(i/45) + (i < 60 ? (60-i)*4 : 0))});
   }
   aranet = {device:{gatt:{connected:true}}, char:{readValue: async () => new DataView(new Uint8Array([0x90,0x01, 0xAC,0x01, 0xA6,0x1D, 28, 90, 1, 60,0, 12,0]).buffer)}, kpa: 75.9};
   window.__demo = { decodeAranet, compute, csv };
