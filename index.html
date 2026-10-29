@@ -108,7 +108,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 <body>
 <main>
   <header>
-    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v5</span></h1>
+    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v6</span></h1>
     <p class="sub">Vernier Go Direct O₂ corrected by Aranet4 barometric pressure. Logs once per minute.</p>
   </header>
 
@@ -210,7 +210,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 const $ = id => document.getElementById(id);
 const STD_ATM_KPA = 101.325;
 const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1';
-const APP_VERSION = '5';
+const APP_VERSION = '6';
 const ARANET_SERVICES = ['0000fce0-0000-1000-8000-00805f9b34fb', 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
 const ARANET_READINGS = 'f0cd3001-95da-4f4b-9ac8-aa55d312af0c';
 const VERNIER_SERVICE = 'd91714ef-28b9-4f91-ba16-f0d9a604f112';
@@ -621,10 +621,21 @@ function niceTicks(min, max, target){
   return { lo, hi, ticks, dec };
 }
 const fmtTime = t => new Date(t).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+// Live view works like a chart recorder: when the readings in the last window don't fill it,
+// the window starts at the first of them so the trace grows from left to right.
+function liveEnd(){
+  const now = Date.now(), span = rangeH * 3600e3;
+  const first = log.find(r => r.t >= now - span);
+  return first ? Math.max(now, first.t + span) : now;
+}
+function earliestEnd(){
+  const span = rangeH * 3600e3, le = liveEnd();
+  return log.length ? Math.min(le, log[0].t + span) : le;
+}
 function windowBounds(){
   const now = Date.now();
   if (!rangeH){ const t0 = log.length ? log[0].t : now - 3600e3; return { t0, t1: Math.max(now, t0 + 60e3) }; }
-  const t1 = viewEnd ?? now;
+  const t1 = viewEnd ?? liveEnd();
   return { t0: t1 - rangeH * 3600e3, t1 };
 }
 function draw(){
@@ -712,35 +723,31 @@ function draw(){
 function updatePanUI(t0, t1){
   const live = !rangeH || viewEnd == null;
   $('panLive').hidden = live;
-  $('panBack').disabled = !rangeH;
+  $('panBack').disabled = !rangeH || t1 <= earliestEnd() + 1000;
   $('panFwd').disabled = !rangeH || viewEnd == null;
-  $('panLabel').textContent = !rangeH ? 'All readings' : (viewEnd == null ? `Live · ${fmtTime(t0)} – now` : `${fmtTime(t0)} – ${fmtTime(t1)}`);
+  $('panLabel').textContent = !rangeH ? 'All readings' : (viewEnd == null ? `Live · ${fmtTime(t0)} – ${fmtTime(t1)}` : `${fmtTime(t0)} – ${fmtTime(t1)}`);
 }
-function setViewEnd(t){
-  if (!rangeH) return;
-  const now = Date.now(), span = rangeH * 3600e3;
-  const earliest = Math.min(now, (log.length ? log[0].t : now) + span);
-  t = Math.max(earliest, Math.min(now, t));
-  viewEnd = (now - t < 30e3) ? null : t;
-  draw();
+function clampEnd(t){
+  const le = liveEnd();
+  t = Math.max(earliestEnd(), Math.min(le, t));
+  return (le - t < 30e3) ? null : t;
 }
+function setViewEnd(t){ if (!rangeH) return; viewEnd = clampEnd(t); draw(); }
 let drawQueued = false;
 function queueDraw(){ if (!drawQueued){ drawQueued = true; requestAnimationFrame(() => { drawQueued = false; draw(); }); } }
 (() => {
   const cv = $('chart'); let drag = null;
-  cv.addEventListener('pointerdown', e => { if (!rangeH) return; drag = { x: e.clientX, end: viewEnd ?? Date.now() }; try { cv.setPointerCapture(e.pointerId); } catch(_) {} });
+  cv.addEventListener('pointerdown', e => { if (!rangeH) return; drag = { x: e.clientX, end: viewEnd ?? liveEnd() }; try { cv.setPointerCapture(e.pointerId); } catch(_) {} });
   cv.addEventListener('pointermove', e => {
     if (!drag) return;
     const span = rangeH * 3600e3, pw = cv.clientWidth - 96;
-    const now = Date.now(), earliest = Math.min(now, (log.length ? log[0].t : now) + span);
-    const t = Math.max(earliest, Math.min(now, drag.end - (e.clientX - drag.x) / pw * span));
-    viewEnd = (now - t < 30e3) ? null : t;
+    viewEnd = clampEnd(drag.end - (e.clientX - drag.x) / pw * span);
     queueDraw();
   });
   ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(n => cv.addEventListener(n, () => { drag = null; }));
 })();
-$('panBack').addEventListener('click', () => { const span = rangeH * 3600e3; setViewEnd((viewEnd ?? Date.now()) - span / 2); });
-$('panFwd').addEventListener('click', () => { const span = rangeH * 3600e3; setViewEnd((viewEnd ?? Date.now()) + span / 2); });
+$('panBack').addEventListener('click', () => { const span = rangeH * 3600e3; setViewEnd((viewEnd ?? liveEnd()) - span / 2); });
+$('panFwd').addEventListener('click', () => { const span = rangeH * 3600e3; setViewEnd((viewEnd ?? liveEnd()) + span / 2); });
 $('panLive').addEventListener('click', () => { viewEnd = null; draw(); });
 window.addEventListener('resize', draw);
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', draw);
