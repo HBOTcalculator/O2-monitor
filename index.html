@@ -70,6 +70,9 @@ button:disabled{opacity:.5;cursor:default}
 @keyframes pulse{50%{filter:brightness(1.25)}}
 @media (prefers-reduced-motion: reduce){.alarm{animation:none}}
 
+.stale{background:var(--warn);color:var(--alarm-ink);border-radius:12px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.stale strong{font:600 1rem var(--display)}
+.stale button{background:var(--alarm-ink);color:var(--warn);border:none}
 /* chart */
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px}
 .row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
@@ -80,6 +83,9 @@ canvas{width:100%;display:block}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.8rem;color:var(--muted)}
 .legend i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
 
+.pan{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pan button{min-height:38px;padding:6px 12px;font-size:.85rem}
+.pan-label{flex:1;min-width:120px;text-align:center;font:.8rem var(--display);color:var(--muted);font-variant-numeric:tabular-nums}
 .controls{display:flex;gap:8px;flex-wrap:wrap}
 .settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
 .field{display:flex;flex-direction:column;gap:4px}
@@ -102,13 +108,18 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 <body>
 <main>
   <header>
-    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v4</span></h1>
+    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v5</span></h1>
     <p class="sub">Vernier Go Direct O₂ corrected by Aranet4 barometric pressure. Logs once per minute.</p>
   </header>
 
   <div id="alarm" class="alarm" role="alert" hidden>
     <div><strong id="alarmText">O₂ 23.5% — HIGH</strong><div id="alarmSub" style="font-size:.85rem">Oxygen-enriched atmosphere</div></div>
     <button id="ackBtn" type="button">Silence</button>
+  </div>
+
+  <div id="stale" class="stale" role="alert" hidden>
+    <div><strong id="staleText">No fresh pressure reading</strong><div id="staleSub" style="font-size:.85rem"></div></div>
+    <button id="staleAck" type="button">Silence</button>
   </div>
 
   <section class="devices" aria-label="Sensors">
@@ -154,13 +165,20 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
         <button type="button" data-h="0" aria-pressed="false">All</button>
       </div>
     </div>
-    <canvas id="chart" height="460" aria-label="Actual oxygen percent, pressure and carbon dioxide over time"></canvas>
+    <canvas id="chart" height="460" style="touch-action:pan-y" aria-label="Actual oxygen percent, pressure and carbon dioxide over time"></canvas>
     <div class="legend">
       <span><i style="background:var(--accent)"></i>Actual O₂ %</span>
       <span><i style="background:var(--press)"></i>Pressure, atm</span>
       <span><i style="background:var(--co2)"></i>CO₂, ppm</span>
       <span><i style="background:var(--alarm)"></i>Alarm limit</span>
     </div>
+    <div class="pan">
+      <button id="panBack" type="button" aria-label="Show earlier">‹ Earlier</button>
+      <span id="panLabel" class="pan-label">Live</span>
+      <button id="panFwd" type="button" aria-label="Show later">Later ›</button>
+      <button id="panLive" type="button" class="primary" hidden>Back to now</button>
+    </div>
+    <p class="note">Drag the graph sideways, or use Earlier and Later, to look back in time.</p>
   </section>
 
   <section class="card" aria-label="Log">
@@ -192,7 +210,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 const $ = id => document.getElementById(id);
 const STD_ATM_KPA = 101.325;
 const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1';
-const APP_VERSION = '4';
+const APP_VERSION = '5';
 const ARANET_SERVICES = ['0000fce0-0000-1000-8000-00805f9b34fb', 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
 const ARANET_READINGS = 'f0cd3001-95da-4f4b-9ac8-aa55d312af0c';
 const VERNIER_SERVICE = 'd91714ef-28b9-4f91-ba16-f0d9a604f112';
@@ -207,6 +225,8 @@ let vDevice = null;
 let alarmSilenced = false, alarmOn = false;
 let audioCtx = null, beepTimer = null, wakeLock = null;
 let rangeH = 6;
+let viewEnd = null;      // null = follow live; otherwise end time of the visible window
+let staleSilenced = false, staleBeepAt = 0;
 let settings = {limit:23.5, refP:1.0};
 
 try { log = JSON.parse(localStorage.getItem(STORE) || '[]'); } catch(e) { log = []; }
@@ -399,19 +419,103 @@ function onVernierValue(v){
   const recent = vSamples.slice(-10);
   const avg = recent.reduce((a,b)=>a+b,0) / recent.length;
   $('vDetail').textContent = `Live raw ${v.toFixed(2)} % · ${vSamples.length} samples this minute`;
-  if (aranet && aranet.kpa) checkAlarm(compute(avg, aranet.kpa).actual);
+  checkAlarm(pressureFresh() ? compute(avg, aranet.kpa).actual : null);
 }
 
 // ---------- Aranet4 ----------
+// Pressure counts as fresh only if the Aranet4 measured it recently. Stale pressure is never
+// used to compute actual O2, so a dropped connection can't cause false highs or lows.
+const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(what + ' timed out')), ms))]);
+// Fresh = we heard from the Aranet4 in the last 40 s (it is polled every 15 s) AND its
+// measurement is no older than one measurement interval plus 30 s.
+const CONTACT_LIMIT_MS = 40000;
+function staleLimitMs(){ return ((aranet && aranet.interval) ? aranet.interval * 1000 : 60000) + 30000; }
+function pressureAge(){ return aranet && aranet.measuredAt ? Date.now() - aranet.measuredAt : Infinity; }
+function contactAge(){ return aranet && aranet.lastContact ? Date.now() - aranet.lastContact : Infinity; }
+function pressureFresh(){ return !!(aranet && aranet.kpa && contactAge() <= CONTACT_LIMIT_MS && pressureAge() <= staleLimitMs()); }
+
 async function getAranetChar(server){
   for (const svc of ARANET_SERVICES){
     try {
       const s = await server.getPrimaryService(svc);
-      dlog(`Aranet4: found service ${svc.slice(0,8)}`);
       return await s.getCharacteristic(ARANET_READINGS);
-    } catch(e) { dlog(`Aranet4: service ${svc.slice(0,8)}: ${e.name || ''} ${e.message || e}`); }
+    } catch(e) { /* try the other service UUID */ }
   }
   throw new Error('Aranet4 readings service not found');
+}
+async function aranetConnect(){
+  const server = await withTimeout(aranet.device.gatt.connect(), 15000, 'Connect');
+  aranet.char = await withTimeout(getAranetChar(server), 10000, 'Service lookup');
+  dlog('Aranet4: connected');
+}
+function applyAranet(d, source){
+  const now = Date.now();
+  const measuredAt = now - (d.ago != null ? d.ago * 1000 : 0);
+  if (aranet.measuredAt && measuredAt < aranet.measuredAt - 5000) return; // older than what we have
+  if (d.hPa != null) aranet.kpa = d.hPa / 10;
+  if (aranet.fails) dlog(`Aranet4: readings back after ${aranet.fails} failed attempt${aranet.fails === 1 ? '' : 's'}`);
+  Object.assign(aranet, { tempC:d.tempC, rh:d.rh, co2:d.co2, interval:d.interval || aranet.interval, measuredAt, lastContact: now, source, everOk:true, fails:0 });
+  if (d.co2 != null) $('co2').innerHTML = `${d.co2} <small>ppm</small>`;
+  updateAranetStatus();
+}
+function updateAranetStatus(){
+  if (!aranet) return;
+  const fresh = pressureFresh(), age = pressureAge();
+  $('aDot').className = fresh ? 'dot on' : 'dot wait';
+  const parts = [];
+  if (aranet.kpa) parts.push(`${aranet.kpa.toFixed(2)} kPa`, `${aranet.tempC.toFixed(1)} °C`, `${aranet.rh}% RH`);
+  if (isFinite(age)) parts.push(`measured ${Math.round(age/1000)} s ago`);
+  if (aranet.source === 'broadcast') parts.push('via broadcast');
+  if (aranet.reconnecting) parts.push('reconnecting…');
+  $('aDetail').textContent = parts.length ? parts.join(' · ') : 'Waiting for first reading…';
+  updateStale();
+}
+let aranetBusy = false;
+async function pollAranet(){
+  if (!aranet || aranetBusy) return;
+  aranetBusy = true;
+  try {
+    for (let attempt = 1; attempt <= 2; attempt++){
+      try {
+        if (!aranet.char || !aranet.device.gatt.connected){ aranet.reconnecting = true; updateAranetStatus(); await aranetConnect(); }
+        const dv = await withTimeout(aranet.char.readValue(), 8000, 'Read');
+        aranet.reconnecting = false;
+        applyAranet(decodeAranet(dv), 'connection');
+        return;
+      } catch(e) {
+        aranet.fails = (aranet.fails || 0) + 1;
+        if (aranet.fails === 1 || aranet.fails % 10 === 0) dlog(`Aranet4: ${e.name && e.name !== 'Error' ? e.name + ': ' : ''}${e.message || e} (failure ${aranet.fails}, still retrying)`, true);
+        // Drop the connection completely and start fresh; a half-open link otherwise fails forever.
+        aranet.char = null;
+        try { aranet.device.gatt.disconnect(); } catch(_) {}
+        aranet.reconnecting = true;
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+  } finally { aranetBusy = false; updateAranetStatus(); }
+}
+// Backup: Aranet4 broadcasts its readings when "Smart Home integrations" is on in Aranet Home.
+function decodeAranetAdvert(dv){
+  if (!dv || dv.byteLength < 21) return null;
+  if (!(dv.getUint8(0) & 0x20)) return null; // integrations off
+  const co2 = dv.getUint16(8, true), tRaw = dv.getUint16(10, true), pRaw = dv.getUint16(12, true);
+  return { co2: (co2 >> 15) ? null : co2, tempC: tRaw / 20, hPa: (pRaw >> 15) ? null : pRaw / 10,
+           rh: dv.getUint8(14), batt: dv.getUint8(15), interval: dv.getUint16(17, true), ago: dv.getUint16(19, true) };
+}
+async function startAdvertWatch(device){
+  if (typeof device.watchAdvertisements !== 'function'){ dlog('Aranet4: broadcast backup not supported by this browser'); return; }
+  try {
+    device.addEventListener('advertisementreceived', ev => {
+      if (!aranet || aranet.device !== device) return;
+      const md = ev.manufacturerData && ev.manufacturerData.get(0x0702);
+      const d = decodeAranetAdvert(md);
+      if (!d){ if (md && !aranet.advWarned){ aranet.advWarned = true; dlog('Aranet4: turn on Smart Home integrations in Aranet Home to get backup readings'); } return; }
+      if (!aranet.advSeen){ aranet.advSeen = true; dlog('Aranet4: receiving backup readings from broadcasts'); }
+      applyAranet(d, 'broadcast');
+    });
+    await device.watchAdvertisements();
+    dlog('Aranet4: listening for broadcasts as a backup');
+  } catch(e) { dlog(`Aranet4: broadcast backup unavailable (${e.message || e})`); }
 }
 async function connectAranet(){
   unlockAudio(); msg('');
@@ -420,41 +524,52 @@ async function connectAranet(){
     $('aDot').className = 'dot wait'; $('aDetail').textContent = 'Choose your Aranet4 in the list…';
     const device = await chooser('Aranet', ARANET_SERVICES);
     dlog(`Aranet4: picked "${device.name || 'unnamed'}"`);
+    if (aranet && aranet.device !== device) { try { aranet.device.gatt.disconnect(); } catch(_) {} }
+    aranet = { device, char:null, fails:0 };
     $('aDetail').textContent = 'Connecting… (iOS may ask for the PIN shown on the Aranet4 screen)';
-    const server = await device.gatt.connect();
-    dlog('Aranet4: connected, looking for readings…');
-    const ch = await getAranetChar(server);
-    aranet = { device, char: ch };
-    device.addEventListener('gattserverdisconnected', () => { $('aDot').className = 'dot wait'; $('aDetail').textContent = 'Connection dropped. Reconnecting at next reading…'; });
+    device.addEventListener('gattserverdisconnected', () => {
+      if (!aranet || aranet.device !== device) return;
+      dlog('Aranet4: connection dropped, reconnecting');
+      aranet.char = null; aranet.reconnecting = true; updateAranetStatus();
+      setTimeout(pollAranet, 2000);
+    });
+    await aranetConnect();
     $('aName').textContent = device.name || 'Aranet4';
     $('aBtn').textContent = 'Reconnect';
-    await readAranet();
+    await pollAranet();
+    startAdvertWatch(device);
     keepAwake();
   } catch(e) {
-    $('aDot').className = aranet ? 'dot wait' : 'dot';
-    if (!aranet) $('aDetail').textContent = 'Not connected';
+    $('aDot').className = aranet && aranet.everOk ? 'dot wait' : 'dot';
+    if (!(aranet && aranet.everOk)) $('aDetail').textContent = 'Not connected';
     msg(explain(e, 'Aranet4'));
   }
 }
-async function readAranet(){
-  if (!aranet) return;
+setInterval(() => { if (aranet) pollAranet(); }, 15000);
+
+// ---------- stale-pressure warning ----------
+function lowBeep(){
+  if (!audioCtx) return;
   try {
-    if (!aranet.device.gatt.connected){
-      const server = await aranet.device.gatt.connect();
-      aranet.char = await getAranetChar(server);
-    }
-    const d = decodeAranet(await aranet.char.readValue());
-    if (d.hPa != null) aranet.kpa = d.hPa / 10;
-    Object.assign(aranet, { tempC:d.tempC, rh:d.rh, co2:d.co2, at:Date.now(), interval:d.interval, ago:d.ago });
-    if (d.co2 != null) $('co2').innerHTML = `${d.co2} <small>ppm</small>`;
-    $('aDot').className = 'dot on';
-    const iv = d.interval ? ` · updates every ${Math.round(d.interval/60)} min` : '';
-    $('aDetail').textContent = `${(aranet.kpa||0).toFixed(2)} kPa · ${d.tempC.toFixed(1)} °C · ${d.rh}% RH${iv}`;
-  } catch(e) {
-    $('aDot').className = 'dot wait';
-    $('aDetail').textContent = 'Read failed, retrying next minute. Using last pressure.';
-  }
+    const now = audioCtx.currentTime;
+    [0, 0.35].forEach(off => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = 'sine'; o.frequency.value = 660;
+      g.gain.setValueAtTime(0.3, now + off); g.gain.setValueAtTime(0, now + off + 0.25);
+      o.connect(g).connect(audioCtx.destination); o.start(now + off); o.stop(now + off + 0.26);
+    });
+  } catch(e) {}
 }
+function updateStale(){
+  const stale = !!(aranet && aranet.everOk && !pressureFresh());
+  $('stale').hidden = !stale;
+  if (!stale){ staleSilenced = false; return; }
+  const secs = Math.round(Math.min(pressureAge(), contactAge()) / 1000);
+  $('staleText').textContent = secs < 120 ? `No fresh pressure for ${secs} s` : `No fresh pressure for ${Math.round(secs / 60)} min`;
+  $('staleSub').textContent = 'Actual O₂ and the O₂ alarm are paused until the Aranet4 reconnects. Raw O₂ and O₂ partial pressure are still logged.';
+  if (!staleSilenced && contactAge() > 90000 && Date.now() - staleBeepAt > 30000){ staleBeepAt = Date.now(); lowBeep(); }
+}
+$('staleAck').addEventListener('click', () => { staleSilenced = true; });
 
 // ---------- minute logger ----------
 let nextTick = Math.ceil(Date.now() / 60000) * 60000;
@@ -462,28 +577,31 @@ async function tick(){
   const now = Date.now();
   const secs = Math.max(0, Math.round((nextTick - now)/1000));
   $('countdown').textContent = (vDevice || aranet || DEMO) ? `Next reading in ${secs} s` : '';
+  updateAranetStatus();
   if (now < nextTick) return;
   nextTick = Math.ceil((now + 1) / 60000) * 60000;
-  await readAranet();
   const fresh = vSamples.length ? vSamples : (vLast != null && now - vLastAt < 120000 ? [vLast] : []);
   vSamples = [];
-  if (!fresh.length || !aranet || !aranet.kpa) {
+  if (!fresh.length || !aranet || !aranet.everOk) {
     if (vDevice || aranet) $('stamp').textContent = !aranet ? 'Connect the Aranet4 to start logging' : (!vDevice ? 'Connect the Vernier sensor to start logging' : 'Waiting for data…');
+    if (viewEnd == null) draw();
     return;
   }
   const raw = fresh.reduce((a,b)=>a+b,0) / fresh.length;
-  const kpa = aranet.kpa;
-  const c = compute(raw, kpa);
-  const row = { t: now, raw, kpa, actual: c.actual, po2Atm: c.po2Atm, tempC: aranet.tempC, rh: aranet.rh, co2: aranet.co2 ?? null };
+  const ok = pressureFresh();
+  const c = ok ? compute(raw, aranet.kpa) : { actual:null, po2Atm: raw / 100 * settings.refP };
+  const age = pressureAge();
+  const row = { t: now, raw, kpa: ok ? aranet.kpa : null, actual: c.actual, po2Atm: c.po2Atm,
+    tempC: ok ? aranet.tempC : null, rh: ok ? aranet.rh : null, co2: ok ? (aranet.co2 ?? null) : null,
+    pAge: isFinite(age) ? Math.round(age / 1000) : null };
   log.push(row); save();
   showRow(row); checkAlarm(c.actual); draw();
 }
 setInterval(tick, 1000);
 
 function showRow(r){
-  const pAtm = r.kpa / STD_ATM_KPA;
-  $('o2Actual').innerHTML = `${r.actual.toFixed(1)}<small>%</small>`;
-  $('pAtm').innerHTML = `${pAtm.toFixed(3)} <small>atm</small>`;
+  $('o2Actual').innerHTML = r.actual != null ? `${r.actual.toFixed(1)}<small>%</small>` : `—<small>%</small>`;
+  $('pAtm').innerHTML = r.kpa != null ? `${(r.kpa / STD_ATM_KPA).toFixed(3)} <small>atm</small>` : `— <small>atm · no fresh reading</small>`;
   $('pO2').innerHTML = `${r.po2Atm.toFixed(3)} <small>atm · ${(r.po2Atm*STD_ATM_KPA).toFixed(1)} kPa</small>`;
   $('o2Raw').innerHTML = `${r.raw.toFixed(2)} <small>%</small>`;
   if (r.co2 != null) $('co2').innerHTML = `${r.co2} <small>ppm</small>`;
@@ -493,52 +611,63 @@ function showRow(r){
 
 // ---------- chart ----------
 function css(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function niceTicks(min, max, target){
+  if (!(max > min)) max = min + 1;
+  const raw = (max - min) / target, mag = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / mag;
+  const step = +((n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag).toFixed(10);
+  const lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step, ticks = [];
+  for (let v = lo; v <= hi + step * 1e-6; v += step) ticks.push(+v.toFixed(10));
+  const dec = Math.min(3, (String(step).split('.')[1] || '').length);
+  return { lo, hi, ticks, dec };
+}
+const fmtTime = t => new Date(t).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+function windowBounds(){
+  const now = Date.now();
+  if (!rangeH){ const t0 = log.length ? log[0].t : now - 3600e3; return { t0, t1: Math.max(now, t0 + 60e3) }; }
+  const t1 = viewEnd ?? now;
+  return { t0: t1 - rangeH * 3600e3, t1 };
+}
 function draw(){
   const cv = $('chart'), dpr = window.devicePixelRatio || 1;
   const W = cv.clientWidth, H = 460;
   cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + 'px';
   const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
   const ink = css('--muted'), line = css('--line'), acc = css('--accent'), prs = css('--press'), alm = css('--alarm'), cc = css('--co2');
-  const font = '11px ' + css('--display');
-  ctx.font = font;
+  ctx.font = '11px ' + css('--display');
 
-  const now = Date.now();
-  let rows = rangeH ? log.filter(r => r.t >= now - rangeH*3600e3) : log.slice();
-  const t1 = rows.length ? Math.max(rows[rows.length-1].t, rangeH ? now : 0) : now;
-  const t0 = rangeH ? t1 - rangeH*3600e3 : (rows.length ? rows[0].t : now - 3600e3);
+  const { t0, t1 } = windowBounds();
   const span = Math.max(t1 - t0, 60e3);
+  const rows = log.filter(r => r.t >= t0 - 5*60e3 && r.t <= t1 + 5*60e3);
+  const inView = rows.filter(r => r.t >= t0 && r.t <= t1);
 
-  const L = 44, R = 50, gap = 26;
+  const L = 46, R = 50, gap = 26;
   const top1 = 10, h1 = 160, top2 = top1 + h1 + gap, h2 = 100, top3 = top2 + h2 + gap, h3 = H - top3 - 24;
   const pw = W - L - R;
   const xOf = t => L + (t - t0) / span * pw;
 
-  // O2 panel scale
+  // scales from the visible rows
   let oMin = 19, oMax = Math.max(settings.limit + 0.5, 24);
-  rows.forEach(r => { oMin = Math.min(oMin, Math.floor(r.actual - 0.5)); oMax = Math.max(oMax, Math.ceil(r.actual + 0.5)); });
-  const yO = v => top1 + h1 - (v - oMin) / (oMax - oMin) * h1;
-  // pressure scale
+  inView.forEach(r => { if (r.actual != null) { oMin = Math.min(oMin, r.actual - 0.5); oMax = Math.max(oMax, r.actual + 0.5); } });
+  const oS = niceTicks(oMin, oMax, 5);
+  const yO = v => top1 + h1 - (v - oS.lo) / (oS.hi - oS.lo) * h1;
   let pMin = Infinity, pMax = -Infinity;
-  rows.forEach(r => { const p = r.kpa / STD_ATM_KPA; pMin = Math.min(pMin, p); pMax = Math.max(pMax, p); });
+  inView.forEach(r => { if (r.kpa != null) { const p = r.kpa / STD_ATM_KPA; pMin = Math.min(pMin, p); pMax = Math.max(pMax, p); } });
   if (!isFinite(pMin)) { pMin = 0.74; pMax = 0.76; }
-  const pPad = Math.max(0.002, (pMax - pMin) * 0.15); pMin -= pPad; pMax += pPad;
-  const yP = v => top2 + h2 - (v - pMin) / (pMax - pMin) * h2;
-  // CO2 scale (ppm)
+  if (pMax - pMin < 0.01) { const m = (pMax + pMin) / 2; pMin = m - 0.005; pMax = m + 0.005; }
+  const pS = niceTicks(pMin, pMax, 4);
+  const yP = v => top2 + h2 - (v - pS.lo) / (pS.hi - pS.lo) * h2;
   let cMin = Infinity, cMax = -Infinity;
-  rows.forEach(r => { if (r.co2 != null) { cMin = Math.min(cMin, r.co2); cMax = Math.max(cMax, r.co2); } });
+  inView.forEach(r => { if (r.co2 != null) { cMin = Math.min(cMin, r.co2); cMax = Math.max(cMax, r.co2); } });
   if (!isFinite(cMin)) { cMin = 400; cMax = 800; }
-  cMin = Math.max(0, Math.floor(cMin / 100) * 100 - 100); cMax = cMin + Math.max(400, Math.ceil((cMax + 100 - cMin) / 400) * 400);
-  const yC = v => top3 + h3 - (v - cMin) / (cMax - cMin) * h3;
+  const cS = niceTicks(Math.max(0, cMin - 50), cMax + 50, 4);
+  const yC = v => top3 + h3 - (v - cS.lo) / (cS.hi - cS.lo) * h3;
 
   // grid + y labels
-  ctx.strokeStyle = line; ctx.fillStyle = ink; ctx.lineWidth = 1; ctx.textBaseline = 'middle';
-  const oStep = (oMax - oMin) > 8 ? 2 : 1;
-  ctx.textAlign = 'right';
-  for (let v = Math.ceil(oMin); v <= oMax; v += oStep){ const y = Math.round(yO(v))+.5; ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(L+pw,y); ctx.stroke(); ctx.fillText(v + '%', L-6, y); }
-  const pTicks = 4;
-  for (let i = 0; i <= pTicks; i++){ const v = pMin + (pMax-pMin)*i/pTicks; const y = Math.round(yP(v))+.5; ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(L+pw,y); ctx.stroke(); ctx.fillText(v.toFixed(3), L-6, y); }
-  for (let i = 0; i <= 4; i++){ const v = cMin + (cMax-cMin)*i/4; const y = Math.round(yC(v))+.5; ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(L+pw,y); ctx.stroke(); ctx.fillText(String(Math.round(v)), L-6, y); }
-  // panel titles
+  ctx.strokeStyle = line; ctx.fillStyle = ink; ctx.lineWidth = 1; ctx.textBaseline = 'middle'; ctx.textAlign = 'right';
+  const grid = (S, yf, fmt) => S.ticks.forEach(v => { const y = Math.round(yf(v)) + .5; ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(L+pw,y); ctx.stroke(); ctx.fillText(fmt(v), L-6, y); });
+  grid(oS, yO, v => v.toFixed(oS.dec) + '%');
+  grid(pS, yP, v => v.toFixed(pS.dec));
+  grid(cS, yC, v => String(Math.round(v)));
   ctx.textAlign = 'left'; ctx.fillStyle = acc; ctx.fillText('O₂ %', L+4, top1+8);
   ctx.fillStyle = prs; ctx.fillText('atm', L+4, top2+8);
   ctx.fillStyle = cc; ctx.fillText('CO₂ ppm', L+4, top3+8);
@@ -546,56 +675,91 @@ function draw(){
   // limit + 20.9 reference
   ctx.setLineDash([5,4]);
   ctx.strokeStyle = alm; ctx.beginPath(); ctx.moveTo(L, yO(settings.limit)); ctx.lineTo(L+pw, yO(settings.limit)); ctx.stroke();
-  ctx.fillStyle = alm; ctx.textAlign = 'left'; ctx.fillText(settings.limit + '%', L+pw+4, yO(settings.limit));
+  ctx.fillStyle = alm; ctx.fillText(settings.limit + '%', L+pw+4, yO(settings.limit));
   ctx.strokeStyle = ink; ctx.globalAlpha = .6; ctx.beginPath(); ctx.moveTo(L, yO(20.9)); ctx.lineTo(L+pw, yO(20.9)); ctx.stroke(); ctx.globalAlpha = 1;
   ctx.fillStyle = ink; ctx.fillText('20.9', L+pw+4, yO(20.9));
   ctx.setLineDash([]);
 
   // x labels
-  ctx.textAlign = 'center'; ctx.fillStyle = ink; ctx.textBaseline = 'top';
-  const nx = W < 420 ? 3 : 5;
+  ctx.fillStyle = ink; ctx.textBaseline = 'top';
+  const nx = Math.max(2, Math.min(6, Math.floor(pw / 95)));
   for (let i = 0; i <= nx; i++){
     const t = t0 + span * i / nx;
-    const lab = new Date(t).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
     ctx.textAlign = i === 0 ? 'left' : i === nx ? 'right' : 'center';
-    ctx.fillText(lab, xOf(t), H - 16);
+    ctx.fillText(fmtTime(t), xOf(t), H - 16);
   }
 
   if (!rows.length){
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = ink; ctx.font = '13px ' + css('--body');
-    ctx.fillText('Readings appear here once both sensors are connected', L + pw/2, top1 + h1/2);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '13px ' + css('--body');
+    ctx.fillText(log.length ? 'No readings in this time window' : 'Readings appear here once both sensors are connected', L + pw/2, top1 + h1/2);
+    updatePanUI(t0, t1);
     return;
   }
+  ctx.save(); ctx.beginPath(); ctx.rect(L, 0, pw, H); ctx.clip();
   const series = (yf, val, color) => {
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.beginPath();
-    let prevT = null;
-    let last = null;
+    let prevT = null, last = null;
     rows.forEach(r => { const v = val(r); if (v == null) { prevT = null; return; } const x = xOf(r.t), y = yf(v); if (prevT == null || r.t - prevT > 5*60e3) ctx.moveTo(x,y); else ctx.lineTo(x,y); prevT = r.t; last = r; });
     ctx.stroke();
-    if (last) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(xOf(last.t), yf(val(last)), 3.5, 0, 7); ctx.fill(); }
+    if (last && last.t <= t1) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(xOf(last.t), yf(val(last)), 3.5, 0, 7); ctx.fill(); }
   };
   series(yO, r => r.actual, acc);
-  series(yP, r => r.kpa / STD_ATM_KPA, prs);
+  series(yP, r => r.kpa != null ? r.kpa / STD_ATM_KPA : null, prs);
   series(yC, r => r.co2 ?? null, cc);
+  ctx.restore();
+  updatePanUI(t0, t1);
 }
+function updatePanUI(t0, t1){
+  const live = !rangeH || viewEnd == null;
+  $('panLive').hidden = live;
+  $('panBack').disabled = !rangeH;
+  $('panFwd').disabled = !rangeH || viewEnd == null;
+  $('panLabel').textContent = !rangeH ? 'All readings' : (viewEnd == null ? `Live · ${fmtTime(t0)} – now` : `${fmtTime(t0)} – ${fmtTime(t1)}`);
+}
+function setViewEnd(t){
+  if (!rangeH) return;
+  const now = Date.now(), span = rangeH * 3600e3;
+  const earliest = Math.min(now, (log.length ? log[0].t : now) + span);
+  t = Math.max(earliest, Math.min(now, t));
+  viewEnd = (now - t < 30e3) ? null : t;
+  draw();
+}
+let drawQueued = false;
+function queueDraw(){ if (!drawQueued){ drawQueued = true; requestAnimationFrame(() => { drawQueued = false; draw(); }); } }
+(() => {
+  const cv = $('chart'); let drag = null;
+  cv.addEventListener('pointerdown', e => { if (!rangeH) return; drag = { x: e.clientX, end: viewEnd ?? Date.now() }; try { cv.setPointerCapture(e.pointerId); } catch(_) {} });
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const span = rangeH * 3600e3, pw = cv.clientWidth - 96;
+    const now = Date.now(), earliest = Math.min(now, (log.length ? log[0].t : now) + span);
+    const t = Math.max(earliest, Math.min(now, drag.end - (e.clientX - drag.x) / pw * span));
+    viewEnd = (now - t < 30e3) ? null : t;
+    queueDraw();
+  });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(n => cv.addEventListener(n, () => { drag = null; }));
+})();
+$('panBack').addEventListener('click', () => { const span = rangeH * 3600e3; setViewEnd((viewEnd ?? Date.now()) - span / 2); });
+$('panFwd').addEventListener('click', () => { const span = rangeH * 3600e3; setViewEnd((viewEnd ?? Date.now()) + span / 2); });
+$('panLive').addEventListener('click', () => { viewEnd = null; draw(); });
 window.addEventListener('resize', draw);
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', draw);
 $('range').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
   rangeH = +b.dataset.h;
   $('range').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b));
-  draw();
+  if (viewEnd != null) setViewEnd(viewEnd); else draw();
 });
 
 // ---------- CSV ----------
 function csv(){
-  const head = 'timestamp_iso,local_time,vernier_raw_o2_pct,pressure_kpa,pressure_atm,o2_partial_pressure_atm,o2_partial_pressure_kpa,actual_o2_pct,aranet_temp_c,aranet_rh_pct,co2_ppm';
+  const head = 'timestamp_iso,local_time,vernier_raw_o2_pct,pressure_kpa,pressure_atm,o2_partial_pressure_atm,o2_partial_pressure_kpa,actual_o2_pct,aranet_temp_c,aranet_rh_pct,co2_ppm,pressure_age_s';
   const lines = log.map(r => [
     new Date(r.t).toISOString(),
     '"' + new Date(r.t).toLocaleString() + '"',
-    r.raw.toFixed(3), r.kpa.toFixed(2), (r.kpa/STD_ATM_KPA).toFixed(4),
-    r.po2Atm.toFixed(4), (r.po2Atm*STD_ATM_KPA).toFixed(2), r.actual.toFixed(2),
-    r.tempC != null ? r.tempC.toFixed(1) : '', r.rh != null ? r.rh : '', r.co2 != null ? r.co2 : ''
+    r.raw.toFixed(3), r.kpa != null ? r.kpa.toFixed(2) : '', r.kpa != null ? (r.kpa/STD_ATM_KPA).toFixed(4) : '',
+    r.po2Atm.toFixed(4), (r.po2Atm*STD_ATM_KPA).toFixed(2), r.actual != null ? r.actual.toFixed(2) : '',
+    r.tempC != null ? r.tempC.toFixed(1) : '', r.rh != null ? r.rh : '', r.co2 != null ? r.co2 : '', r.pAge != null ? r.pAge : ''
   ].join(','));
   return [head, ...lines].join('\n') + '\n';
 }
@@ -640,8 +804,10 @@ if (DEMO){
     const c = compute(raw, kpa);
     log.push({t: t - i*60e3, raw, kpa, actual:c.actual, po2Atm:c.po2Atm, tempC:21.4, rh:28, co2: Math.round(520 + 180*Math.sin(i/45) + (i < 60 ? (60-i)*4 : 0))});
   }
-  aranet = {device:{gatt:{connected:true}}, char:{readValue: async () => new DataView(new Uint8Array([0x90,0x01, 0xAC,0x01, 0xA6,0x1D, 28, 90, 1, 60,0, 12,0]).buffer)}, kpa: 75.9};
-  window.__demo = { decodeAranet, compute, csv };
+  aranet = {device:{gatt:{connected:true, disconnect(){}}}, char:{readValue: async () => new DataView(new Uint8Array([0x90,0x01, 0xAC,0x01, 0xA6,0x1D, 28, 90, 1, 60,0, 12,0]).buffer)}, kpa: 75.9, everOk:true, measuredAt: Date.now(), lastContact: Date.now(), interval:60, tempC:21.4, rh:28, co2:400};
+}
+if (/[?&]test\b/.test(location.search)) {
+  window.__t = { onVernierValue, decodeAranetAdvert, setVDevice: v => { vDevice = v; }, get log(){ return log; } };
 }
 
 if (log.length) showRow(log[log.length-1]);
