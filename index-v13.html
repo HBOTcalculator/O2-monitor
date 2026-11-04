@@ -1,0 +1,1098 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Altitude O₂ Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo+Mono:wght@400;600&family=Public+Sans:wght@400;600;700&display=swap">
+<!-- Vernier Go Direct library, BSD 3-Clause, (c) Vernier Software & Technology -->
+<script src="https://unpkg.com/@vernier/godirect@1.8.3/dist/godirect.min.umd.js"></script>
+<style>
+/* Layout: one column instrument panel — status strip, four readouts, chart, log controls */
+:root{
+  --bg:#eef2f4; --panel:#ffffff; --ink:#14232b; --muted:#5b6d76; --line:#d3dde2;
+  --accent:#0b6f8a; --accent-soft:#d8ecf2; --press:#7a5a12; --co2:#6a4c9c;
+  --ok:#1d7a4c; --warn:#a86a00; --alarm:#c4242b; --alarm-ink:#ffffff;
+  --display:"Chivo Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --body:"Public Sans", -apple-system, "Helvetica Neue", Arial, sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0d161b; --panel:#152229; --ink:#e3edf1; --muted:#8fa3ad; --line:#26363e;
+  --accent:#4fb8d6; --accent-soft:#16343f; --press:#d9b45a; --co2:#b9a2e6;
+  --ok:#4cc58a; --warn:#e3a33a; --alarm:#ff4d55; --alarm-ink:#1a0003; color-scheme:dark }}
+:root[data-theme="dark"]{
+  --bg:#0d161b; --panel:#152229; --ink:#e3edf1; --muted:#8fa3ad; --line:#26363e;
+  --accent:#4fb8d6; --accent-soft:#16343f; --press:#d9b45a; --co2:#b9a2e6;
+  --ok:#4cc58a; --warn:#e3a33a; --alarm:#ff4d55; --alarm-ink:#1a0003; color-scheme:dark }
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.45 var(--body);
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-top:max(12px,env(safe-area-inset-top,0px));padding-bottom:max(24px,env(safe-area-inset-bottom,0px))}
+main{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+h1{font:600 1.05rem/1.2 var(--display);letter-spacing:.02em;margin:4px 0 0;text-wrap:balance}
+.sub{color:var(--muted);font-size:.85rem;margin:2px 0 0}
+.label{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
+button,select,input{font:inherit;color:inherit}
+button{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:10px 14px;font-weight:600;cursor:pointer;min-height:44px}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--panel)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+button:disabled{opacity:.5;cursor:default}
+
+/* device strip */
+.devices{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.dev{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.dev-head{display:flex;align-items:center;gap:8px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--line);flex:none}
+.dot.on{background:var(--ok)} .dot.wait{background:var(--warn)}
+.dev-name{font-weight:600;font-size:.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dev-detail{font:.8rem/1.35 var(--display);color:var(--muted);font-variant-numeric:tabular-nums;min-height:2.7em}
+
+/* readouts */
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;display:grid;grid-template-columns:1.3fr 1fr;gap:14px;align-items:end}
+.big{font:600 clamp(3rem,15vw,5.2rem)/1 var(--display);font-variant-numeric:tabular-nums;color:var(--accent);letter-spacing:-.03em}
+.big small{font-size:.38em;color:var(--muted);letter-spacing:0;margin-left:2px}
+.hero .side{display:flex;flex-direction:column;gap:10px}
+.kv{display:flex;flex-direction:column;gap:1px}
+.kv .v{font:600 1.35rem/1.15 var(--display);font-variant-numeric:tabular-nums}
+.kv .v small{font-size:.65em;color:var(--muted);font-weight:400}
+.stamp{grid-column:1/-1;color:var(--muted);font-size:.8rem;border-top:1px solid var(--line);padding-top:10px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.press-v{color:var(--press)} .co2-v{color:var(--co2)}
+
+/* alarm */
+.alarm{background:var(--alarm);color:var(--alarm-ink);border-radius:12px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;animation:pulse 1s steps(2,end) infinite}
+.alarm strong{font:600 1.1rem var(--display)}
+.alarm button{background:var(--alarm-ink);color:var(--alarm);border:none}
+@keyframes pulse{50%{filter:brightness(1.25)}}
+@media (prefers-reduced-motion: reduce){.alarm{animation:none}}
+
+.stale{background:var(--warn);color:var(--alarm-ink);border-radius:12px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.stale strong{font:600 1rem var(--display)}
+.stale button{background:var(--alarm-ink);color:var(--warn);border:none}
+/* chart */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:none;border-radius:0;min-height:36px;padding:6px 9px;font-size:.82rem;background:transparent;white-space:nowrap}
+.rangebar{flex:1 1 100%;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0}
+.seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
+canvas{width:100%;display:block}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.8rem;color:var(--muted)}
+.legend i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
+
+.gread{display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap}
+.gr{display:flex;flex-direction:column;gap:2px}
+.gv{font:600 clamp(1.7rem,8.5vw,2.6rem)/1 var(--display);font-variant-numeric:tabular-nums;color:var(--accent);letter-spacing:-.02em}
+.gv.co2-v{color:var(--co2)}
+.rec{margin-left:auto;min-height:36px;padding:4px 8px;font-size:.74rem;line-height:1.15;white-space:nowrap;flex:none;color:var(--alarm);border-color:var(--alarm)}
+.rec.start{color:var(--panel);background:var(--ok);border-color:var(--ok)}
+.gr.next{margin-left:auto;align-items:flex-end}
+.nv{font:600 1.35rem/1.15 var(--display);font-variant-numeric:tabular-nums;color:var(--ink)}
+.gread{flex:1 1 100%;min-width:0;flex-wrap:nowrap;gap:14px}
+.gv small{font-size:.45em;color:var(--muted);font-weight:400;margin-left:3px;letter-spacing:0}
+.pan{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pan button{min-height:38px;padding:6px 12px;font-size:.85rem}
+.pan-label{flex:1;min-width:120px;text-align:center;font:.8rem var(--display);color:var(--muted);font-variant-numeric:tabular-nums}
+.controls{display:flex;gap:8px;flex-wrap:wrap}
+.settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.field{display:flex;flex-direction:column;gap:4px}
+.field input{border:1px solid var(--line);border-radius:8px;padding:9px 10px;background:var(--bg);font-family:var(--display);font-variant-numeric:tabular-nums;min-height:44px}
+.note{font-size:.8rem;color:var(--muted);margin:0;max-width:65ch}
+.msg{font-size:.85rem;color:var(--warn);margin:0;min-height:1.2em}
+.formula{font:.8rem var(--display);color:var(--muted);background:var(--bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+.check{display:flex;align-items:center;gap:8px;font-size:.85rem;color:var(--muted)}
+.check input{width:20px;height:20px;accent-color:var(--accent)}
+.diag summary{cursor:pointer}
+.diag ol{margin:0;padding:0;list-style:none;font:.75rem/1.5 var(--display);color:var(--muted);max-height:220px;overflow:auto;overflow-wrap:anywhere}
+.diag li.bad{color:var(--alarm)}
+/* O2 supply marker */
+.supply{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.supply-btns{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.supply-btns button{min-height:64px;font:600 1.1rem var(--display);letter-spacing:.02em}
+.supply-btns button[aria-pressed="true"]#supOn{background:var(--ok);border-color:var(--ok);color:var(--panel)}
+.supply-btns button[aria-pressed="true"]#supOff{background:var(--warn);border-color:var(--warn);color:var(--alarm-ink)}
+.supply-state{font:.85rem var(--display);color:var(--muted);font-variant-numeric:tabular-nums}
+.supply-hist{margin:0;padding:0;list-style:none;font:.75rem/1.5 var(--display);color:var(--muted);max-height:96px;overflow:auto}
+textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px}
+@media (max-width:520px){
+  .devices{grid-template-columns:1fr}
+  .hero{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v13</span></h1>
+    <p class="sub">Vernier Go Direct O₂ corrected by Aranet4 barometric pressure. Logs once per minute.</p>
+  </header>
+
+  <div id="alarm" class="alarm" role="alert" hidden>
+    <div><strong id="alarmText">O₂ 23.5% — HIGH</strong><div id="alarmSub" style="font-size:.85rem">Oxygen-enriched atmosphere</div></div>
+    <button id="ackBtn" type="button">Silence</button>
+  </div>
+
+  <div id="stale" class="stale" role="alert" hidden>
+    <div><strong id="staleText">No fresh pressure reading</strong><div id="staleSub" style="font-size:.85rem"></div></div>
+    <button id="staleAck" type="button">Silence</button>
+  </div>
+
+  <section class="devices" aria-label="Sensors">
+    <div class="dev">
+      <div class="dev-head"><span id="vDot" class="dot"></span><span class="dev-name" id="vName">Vernier O₂ sensor</span></div>
+      <div class="dev-detail" id="vDetail">Not connected</div>
+      <button id="vBtn" class="primary" type="button">Connect Vernier</button>
+    </div>
+    <div class="dev">
+      <div class="dev-head"><span id="aDot" class="dot"></span><span class="dev-name" id="aName">Aranet4</span></div>
+      <div class="dev-detail" id="aDetail">Not connected</div>
+      <button id="aBtn" class="primary" type="button">Connect Aranet4</button>
+    </div>
+  </section>
+  <label class="check" for="showAll"><input id="showAll" type="checkbox"> Show all nearby devices in the list (use if your sensor doesn't appear)</label>
+  <p class="msg" id="msg" role="status"></p>
+  <details class="card diag" id="diag" open>
+    <summary class="label">Connection log</summary>
+    <ol id="diagList"></ol>
+  </details>
+
+  <section class="hero" aria-label="Current readings">
+    <div>
+      <div class="label">Actual O₂ concentration</div>
+      <div class="big" id="o2Actual">—<small>%</small></div>
+    </div>
+    <div class="side">
+      <div class="kv"><span class="label">Pressure</span><span class="v press-v" id="pAtm">— <small>atm</small></span></div>
+      <div class="kv"><span class="label">O₂ partial pressure</span><span class="v" id="pO2">— <small>atm</small></span></div>
+      <div class="kv"><span class="label">Carbon dioxide</span><span class="v co2-v" id="co2">— <small>ppm</small></span></div>
+      <div class="kv"><span class="label">Vernier raw reading</span><span class="v" id="o2Raw">— <small>%</small></span></div>
+    </div>
+    <div class="stamp"><span id="stamp">Waiting for both sensors</span></div>
+  </section>
+
+  <section class="supply" aria-label="Oxygen supply">
+    <div class="row"><span class="label">Oxygen supply</span><span class="supply-state" id="supState">Not marked yet</span></div>
+    <div class="supply-btns" role="group" aria-label="Mark oxygen supply on or off">
+      <button id="supOn" type="button" aria-pressed="false">O₂ ON</button>
+      <button id="supOff" type="button" aria-pressed="false">O₂ OFF</button>
+    </div>
+    <div class="row">
+      <span class="note">Tap when oxygen is turned off or back on. Each change is time-stamped, shaded on the graph and saved in the CSV.</span>
+      <button id="supUndo" type="button" hidden>Undo last mark</button>
+    </div>
+    <ol class="supply-hist" id="supHist" aria-label="Oxygen supply changes"></ol>
+  </section>
+
+  <section class="card" aria-label="Graph">
+    <div class="row">
+      <div class="gread" aria-live="polite">
+        <div class="gr"><span class="label">Actual O₂</span><span class="gv" id="gO2">—<small>%</small></span></div>
+        <div class="gr"><span class="label">CO₂</span><span class="gv co2-v" id="gCO2">—<small>ppm</small></span></div>
+        <div class="gr next"><span class="label">Next in</span><span class="nv" id="countdown">—</span></div>
+      </div>
+      <div class="rangebar">
+      <div class="seg" id="range" role="group" aria-label="Time range">
+        <button type="button" data-h="1" aria-pressed="false">1 h</button>
+        <button type="button" data-h="2" aria-pressed="false">2 h</button>
+        <button type="button" data-h="6" aria-pressed="true">6 h</button>
+        <button type="button" data-h="24" aria-pressed="false">24 h</button>
+        <button type="button" data-h="0" aria-pressed="false">All</button>
+      </div>
+      <button id="recBtn" type="button" class="rec">■ Stop &amp; save</button>
+      </div>
+    </div>
+    <canvas id="chart" height="460" style="touch-action:pan-y" aria-label="Actual oxygen percent, pressure and carbon dioxide over time"></canvas>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>Actual O₂ %</span>
+      <span><i style="background:var(--press)"></i>Pressure, atm</span>
+      <span><i style="background:var(--co2)"></i>CO₂, ppm</span>
+      <span><i style="background:var(--alarm)"></i>Alarm limit</span>
+      <span><i style="background:var(--warn);height:10px;opacity:.35"></i>O₂ supply off</span>
+    </div>
+    <div class="pan">
+      <button id="panBack" type="button" aria-label="Show earlier">‹ Earlier</button>
+      <span id="panLabel" class="pan-label">Live</span>
+      <button id="panFwd" type="button" aria-label="Show later">Later ›</button>
+      <button id="panLive" type="button" class="primary" hidden>Back to now</button>
+    </div>
+    <p class="note">Drag the graph sideways, or use Earlier and Later, to look back in time.</p>
+  </section>
+
+  <section class="card" aria-label="Log">
+    <div class="row"><span class="label">Log</span><span class="note" id="logCount">0 readings</span></div>
+    <div class="controls">
+      <button id="shareBtn" type="button">Export all</button>
+      <button id="copyBtn" type="button">Copy CSV</button>
+      <button id="sessBtn" type="button" hidden>Export last session</button>
+      <button id="clearBtn" type="button">Clear log</button>
+      <button id="clearConfirm" type="button" hidden style="color:var(--alarm)">Tap again to erase</button>
+    </div>
+    <textarea id="csvFallback" readonly hidden aria-label="CSV text"></textarea>
+  </section>
+
+  <section class="card" aria-label="Settings">
+    <span class="label">Settings</span>
+    <div class="settings">
+      <label class="field" for="limit"><span class="label">High-O₂ alarm at (%)</span><input id="limit" type="number" step="0.1" min="19" max="100" value="23.5"></label>
+      <label class="field" for="refP"><span class="label">Sensor calibration pressure (atm)</span><input id="refP" type="number" step="0.001" min="0.5" max="1.2" value="1.000"></label>
+    </div>
+    <div class="formula">actual O₂ % = raw % × (P<sub>cal</sub> ÷ P) &nbsp;·&nbsp; pO₂ = raw % ÷ 100 × P<sub>cal</sub></div>
+    <p class="note">The Go Direct O₂ sensor responds to oxygen partial pressure and is factory-calibrated to read 20.9% at 1 atm. Leave calibration pressure at 1.000 unless you recalibrate the sensor at another pressure. Each logged value is the average of the Vernier readings over that minute, paired with the latest Aranet4 pressure.</p>
+    <p class="note">Keep this page open with the screen on. iOS pauses Bluetooth when the screen locks or you switch apps; set Auto-Lock to Never while monitoring. Alarm sound needs the ringer switch on.</p>
+  </section>
+</main>
+
+<script>
+(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+const STD_ATM_KPA = 101.325;
+const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1', EVENTS = 'o2mon.events.v1';
+const APP_VERSION = '13';
+const ARANET_SERVICES = ['0000fce0-0000-1000-8000-00805f9b34fb', 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
+const ARANET_READINGS = 'f0cd3001-95da-4f4b-9ac8-aa55d312af0c';
+const VERNIER_SERVICE = 'd91714ef-28b9-4f91-ba16-f0d9a604f112';
+const DEMO = /[?&]demo\b/.test(location.search);
+
+// ---------- state ----------
+let log = [];            // {t, raw, kpa, actual, po2Atm}
+let vSamples = [];       // raw O2 % samples within current minute
+let vLast = null, vLastAt = 0;
+let aranet = null;       // {device, char, kpa, tempC, rh, co2, at}
+let vDevice = null;
+let alarmSilenced = false, alarmOn = false;
+let audioCtx = null, beepTimer = null, wakeLock = null;
+let rangeH = 6;
+let viewEnd = null;      // null = follow live; otherwise end time of the visible window
+let staleSilenced = false, staleBeepAt = 0;
+let settings = {limit:23.5, refP:1.0, recording:true, sessionStart:null};
+
+try { log = JSON.parse(localStorage.getItem(STORE) || '[]'); } catch(e) { log = []; }
+let events = [];          // O2 supply changes: {t, on:true|false, s:sessionStart}
+try { events = JSON.parse(localStorage.getItem(EVENTS) || '[]'); } catch(e) { events = []; }
+const saveEvents = () => { try { localStorage.setItem(EVENTS, JSON.stringify(events)); } catch(e) {} };
+// O2 supply state at time t: the last mark at or before t (null = never marked).
+function supplyAt(t){ let st = null; for (const e of events) { if (e.t <= t) st = e.on; else break; } return st; }
+try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS) || '{}')); } catch(e) {}
+if (settings.recording && !settings.sessionStart) settings.sessionStart = Date.now();
+$('limit').value = settings.limit; $('refP').value = settings.refP.toFixed(3);
+
+const save = () => { try { localStorage.setItem(STORE, JSON.stringify(log)); } catch(e) {} };
+const saveSettings = () => { try { localStorage.setItem(SETTINGS, JSON.stringify(settings)); } catch(e) {} };
+let msgFor = null;        // 'Vernier' | 'Aranet4' when the banner is a connection error
+const msg = (t, who) => { $('msg').textContent = t || ''; msgFor = t ? (who || null) : null; };
+function clearMsgIfAbout(who){ if (msgFor === who) msg(''); }
+function dlog(text, bad){
+  const li = document.createElement('li');
+  li.textContent = new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'}) + '  ' + text;
+  if (bad) li.className = 'bad';
+  $('diagList').appendChild(li);
+  while ($('diagList').children.length > 60) $('diagList').firstChild.remove();
+}
+(async () => {
+  dlog(`App version ${APP_VERSION}`);
+  dlog('Bluetooth API: ' + (navigator.bluetooth ? 'present' : 'MISSING (use Bluefy)'), !navigator.bluetooth);
+  dlog('Vernier library: ' + (window.godirect ? 'loaded' : 'NOT loaded'), !window.godirect);
+  try { if (navigator.bluetooth && navigator.bluetooth.getAvailability) { const ok = await navigator.bluetooth.getAvailability(); dlog('Bluetooth available: ' + (ok ? 'yes' : 'NO — check Bluetooth is on and Bluefy is allowed in Settings'), !ok); } } catch(e) {}
+})();
+
+// ---------- physics ----------
+function compute(raw, kpa){
+  const pAtm = kpa / STD_ATM_KPA;
+  const actual = raw * settings.refP / pAtm;
+  const po2Atm = raw / 100 * settings.refP;
+  return {pAtm, actual, po2Atm};
+}
+
+// ---------- Aranet4 decoding (f0cd3001: co2,temp,pressure,rh,batt,status,interval,ago) ----------
+function decodeAranet(dv){
+  const co2 = dv.getUint16(0, true);
+  const tRaw = dv.getUint16(2, true);
+  const pRaw = dv.getUint16(4, true);
+  const rh = dv.getUint8(6);
+  const batt = dv.getUint8(7);
+  const interval = dv.byteLength >= 11 ? dv.getUint16(9, true) : null;
+  const ago = dv.byteLength >= 13 ? dv.getUint16(11, true) : null;
+  const pValid = (pRaw >> 15) === 0;
+  return { co2: (co2 >> 15) ? null : co2, tempC: tRaw / 20, hPa: pValid ? pRaw / 10 : null, rh, batt, interval, ago };
+}
+
+// ---------- audio / wake ----------
+function unlockAudio(){
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    g.gain.value = 0.0001; o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.05);
+  } catch(e) {}
+}
+function beep(){
+  if (!audioCtx) return;
+  try {
+    const now = audioCtx.currentTime;
+    [0, 0.25].forEach(off => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = 'square'; o.frequency.value = 2200;
+      g.gain.setValueAtTime(0.25, now + off); g.gain.setValueAtTime(0, now + off + 0.15);
+      o.connect(g).connect(audioCtx.destination); o.start(now + off); o.stop(now + off + 0.16);
+    });
+  } catch(e) {}
+}
+async function keepAwake(){
+  try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch(e) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (!(vBt || aranet)) return;
+  if (document.visibilityState === 'visible') { dlog('Page back in front'); keepAwake(); }
+  else dlog('Page went to the background — iOS will pause monitoring', true);
+});
+
+// ---------- alarm ----------
+function checkAlarm(actual){
+  const over = actual != null && actual >= settings.limit;
+  if (over && !alarmOn){
+    alarmOn = true; alarmSilenced = false;
+    $('alarm').hidden = false;
+    if (!beepTimer) beepTimer = setInterval(() => { if (!alarmSilenced) beep(); }, 1000);
+    beep();
+  }
+  if (over){
+    $('alarmText').textContent = `O₂ ${actual.toFixed(1)}% — HIGH`;
+    $('alarmSub').textContent = `At or above the ${settings.limit}% limit. Oxygen-enriched atmosphere.`;
+    document.title = `⚠ O₂ ${actual.toFixed(1)}%`;
+  }
+  if (!over && alarmOn){
+    alarmOn = false; $('alarm').hidden = true;
+    clearInterval(beepTimer); beepTimer = null;
+    document.title = 'Altitude O₂ Monitor';
+  }
+}
+$('ackBtn').addEventListener('click', () => { alarmSilenced = true; $('ackBtn').textContent = 'Silenced'; setTimeout(() => $('ackBtn').textContent = 'Silence', 3000); });
+
+// ---------- Vernier ----------
+function pickO2Sensor(dev){
+  const s = dev.sensors;
+  return s.find(x => /o2|oxygen/i.test(x.name) && /%/.test(x.unit))
+      || s.find(x => /%/.test(x.unit))
+      || s.find(x => x.enabled) || s[0];
+}
+// Our own Go Direct Bluetooth adapter. Vernier's built-in one matches characteristic
+// UUIDs by exact lowercase text, which fails in iOS browsers (Bluefy) that report them
+// in uppercase. Here each characteristic is requested by UUID instead.
+const GDX_COMMAND = 'f4bf14a6-c7d5-4b6d-8aa8-df1a7c83adcb';
+const GDX_RESPONSE = 'b41e6675-a329-40e0-aa01-44d2f444babe';
+function makeVernierAdapter(bt){
+  return {
+    godirectAdapter: true,
+    maxPacketLength: 20,
+    deviceCommand: null,
+    deviceResponse: null,
+    async setup({ onClosed, onResponse }){
+      bt.addEventListener('gattserverdisconnected', onClosed);
+      const server = await bt.gatt.connect();
+      dlog('Vernier: Bluetooth connected');
+      const service = await server.getPrimaryService(VERNIER_SERVICE);
+      dlog('Vernier: Go Direct service found');
+      let cmd, rsp;
+      try {
+        cmd = await service.getCharacteristic(GDX_COMMAND);
+        rsp = await service.getCharacteristic(GDX_RESPONSE);
+      } catch(e) {
+        dlog(`Vernier: direct lookup failed (${e.name || ''} ${e.message || e}), scanning list…`);
+        const list = await service.getCharacteristics();
+        dlog('Vernier: characteristics ' + list.map(c => c.uuid).join(', '));
+        cmd = list.find(c => String(c.uuid).toLowerCase() === GDX_COMMAND);
+        rsp = list.find(c => String(c.uuid).toLowerCase() === GDX_RESPONSE);
+      }
+      if (!cmd || !rsp) throw new Error('Go Direct command/response channels not found');
+      this.deviceCommand = cmd; this.deviceResponse = rsp;
+      rsp.addEventListener('characteristicvaluechanged', ev => onResponse(ev.target.value));
+      await rsp.startNotifications();
+      dlog('Vernier: notifications on');
+    },
+    async renotify(){ if (this.deviceResponse) { try { await this.deviceResponse.stopNotifications(); } catch(_) {} await this.deviceResponse.startNotifications(); } },
+    writeCommand(buf){ return this.deviceCommand.writeValue(buf); },
+    async close(){ return bt.gatt.disconnect(); }
+  };
+}
+function chooser(namePrefix, services){
+  const all = $('showAll').checked;
+  dlog(`Opening device list (${all ? 'all nearby devices' : 'names starting "' + namePrefix + '"'})`);
+  return navigator.bluetooth.requestDevice(all
+    ? { acceptAllDevices:true, optionalServices:services }
+    : { filters:[{namePrefix}], optionalServices:services });
+}
+function explain(e, who){
+  const n = e && e.name, m = (e && e.message) || String(e);
+  dlog(`${who} error: ${n || 'Error'}: ${m}`, true);
+  if (n === 'NotFoundError') return `${who}: nothing selected. If the sensor wasn't in the list, check it's switched on and not connected to another app, or tick "Show all nearby devices" and look for it there.`;
+  if (n === 'SecurityError' || n === 'NotAllowedError') return `${who}: Bluetooth permission was refused. Open iPhone Settings › Bluefy and turn Bluetooth on, then reload this page.`;
+  if (n === 'NetworkError') return `${who}: the sensor didn't accept the connection. It may still be connected to another app; close that app, or turn the sensor off and on, and try again.`;
+  if (!e || !e.message) return `${who}: Bluetooth link lost (iOS code ${m}). The app reconnects on its own; this message clears when readings come back.`;
+  return `${who}: ${m}`;
+}
+// Vernier: connect once through the chooser, then keep it alive automatically.
+let vBt = null, vBusy = false, vRestartAt = 0, vReconnectAt = 0, vFails = 0, vConnectedAt = 0;
+const V_STALE_MS = 15000;
+function vernierAge(){ return vLastAt ? Date.now() - vLastAt : Infinity; }
+function vernierFresh(){ return !!vDevice && (vernierAge() <= V_STALE_MS || (!vLastAt && Date.now() - vConnectedAt < V_STALE_MS)); }
+async function setupVernier(bt){
+  const adapter = makeVernierAdapter(bt);
+  const dev = await godirect.createDevice(adapter, { open:false });
+  dev._o2adapter = adapter;
+  await withTimeout(dev.open(false), 20000, 'Go Direct open');
+  dev.keepValues = false;
+  const s = pickO2Sensor(dev);
+  if (!s) throw new Error('No sensor channels reported by the device');
+  dev.sensors.forEach(x => { if (x !== s && x.enabled) x.setEnabled(false); });
+  s.setEnabled(true);
+  s.on('value-changed', sensor => { if (vDevice === dev) onVernierValue(sensor.value); });
+  dev.on('device-closed', () => {
+    if (vDevice !== dev) return;
+    dlog('Vernier: link closed, reconnecting');
+    vDevice = null; vReconnectAt = Date.now() + 2000;
+  });
+  dev.start(1000);
+  vDevice = dev; vConnectedAt = Date.now(); vRestarts = 0;
+  $('vName').textContent = dev.name || 'Vernier O₂';
+  $('vBtn').textContent = 'Reconnect';
+  return s;
+}
+async function connectVernier(){
+  unlockAudio(); msg('');
+  if (!navigator.bluetooth) { msg('This browser has no Bluetooth access. On iPhone, open this page in the Bluefy browser.'); dlog('navigator.bluetooth missing', true); return; }
+  if (!window.godirect) { msg('The Vernier library did not load. Check your internet connection and reload.'); dlog('Vernier library missing', true); return; }
+  let bt = null;
+  try {
+    $('vDot').className = 'dot wait'; $('vDetail').textContent = 'Choose your GDX-O2 in the list…';
+    bt = await chooser('GDX', [VERNIER_SERVICE]);
+    dlog(`Vernier: picked "${bt.name || 'unnamed'}"`);
+    if (vDevice) await dropVernier();
+    $('vDetail').textContent = 'Connecting…';
+    vBt = bt;
+    const s = await setupVernier(bt);
+    dlog(`Vernier: measuring ${s.name} (${s.unit})`);
+    $('vDot').className = 'dot on';
+    $('vDetail').textContent = `${s.name} (${s.unit}) · 1 s samples`;
+    keepAwake();
+  } catch(e) {
+    $('vDot').className = vDevice ? 'dot on' : 'dot';
+    $('vDetail').textContent = vDevice ? $('vDetail').textContent : 'Not connected';
+    if (bt && !vDevice) { try { bt.gatt.disconnect(); dlog('Vernier: released the sensor after the failed attempt'); } catch(_) {} }
+    msg(explain(e, 'Vernier'), 'Vernier');
+  }
+}
+async function dropVernier(){
+  const old = vDevice; vDevice = null;
+  if (old) { try { await withTimeout(old.close(), 3000, 'close'); } catch(_) {} }
+  try { vBt && vBt.gatt.disconnect(); } catch(_) {}
+}
+// Watchdog. The Vernier sends a value every second. When values stop but the Bluetooth link
+// is still up (the usual case on iPhone), re-arm notifications and restart measurements;
+// that takes about a second. Tear the link down and reconnect only if that fails twice or
+// the link has actually closed.
+const V_NUDGE_MS = 6000;
+let vRestarts = 0;
+setInterval(async () => {
+  if (!vBt || vBusy) return;
+  const now = Date.now(), age = vernierAge();
+  const sinceConnect = now - vConnectedAt;
+  if (vDevice && (age <= V_NUDGE_MS || (!vLastAt && sinceConnect < V_STALE_MS))) return;
+  vBusy = true;
+  try {
+    const linkUp = !!(vBt.gatt && vBt.gatt.connected);
+    if (vDevice && linkUp && vRestarts < 2 && now > vRestartAt) {
+      vRestartAt = now + 6000; vRestarts++;
+      dlog(`Vernier: no readings for ${Math.round(age/1000)} s, link still up — restarting stream (${vRestarts}/2)`);
+      vDevice.remainingResponseLegnth = 0; vDevice.response = null;   // clear any half-received packet
+      try { await withTimeout(vDevice._o2adapter.renotify(), 4000, 'Re-arm notifications'); } catch(_) {}
+      try { vDevice.stop(); } catch(_) {}
+      await new Promise(r => setTimeout(r, 400));
+      try { vDevice.start(1000); } catch(_) {}
+    } else if ((!vDevice || !linkUp || vRestarts >= 2) && now > vRestartAt && now > vReconnectAt) {
+      vFails++;
+      vReconnectAt = now + Math.min(30000, 3000 * vFails);    // back off: 3 s, 6 s, 9 s … 30 s
+      dlog(`Vernier: reconnecting (attempt ${vFails}${linkUp ? ', stream would not restart' : ', link closed'})`, vFails >= 3);
+      await dropVernier();
+      await new Promise(r => setTimeout(r, 1000));
+      const sn = await setupVernier(vBt);
+      dlog(`Vernier: reconnected, measuring ${sn.name}`);
+    }
+  } catch(e) {
+    dlog(`Vernier: reconnect failed (${e.message || e}), will keep trying`, vFails >= 3);
+    vDevice = null;
+  } finally { vBusy = false; }
+}, 2000);
+function updateVernierStatus(){
+  if (!vBt) return;
+  const age = vernierAge();
+  if (vernierFresh()) { $('vDot').className = 'dot on'; return; }
+  $('vDot').className = 'dot wait';
+  $('vDetail').textContent = (isFinite(age) ? `No readings for ${Math.round(age/1000)} s` : 'No readings yet') + (vDevice ? ' · restarting…' : ' · reconnecting…');
+}
+function onVernierValue(v){
+  if (typeof v !== 'number' || !isFinite(v)) return;
+  if (vFails || vRestarts) { dlog('Vernier: readings back'); vFails = 0; vRestarts = 0; }
+  clearMsgIfAbout('Vernier');
+  vLast = v; vLastAt = Date.now(); vSamples.push(v);
+  const recent = vSamples.slice(-10);
+  const avg = recent.reduce((a,b)=>a+b,0) / recent.length;
+  $('vDetail').textContent = `Live raw ${v.toFixed(2)} % · ${vSamples.length} samples this minute`;
+  checkAlarm(pressureFresh() ? compute(avg, aranet.kpa).actual : null);
+}
+
+// ---------- Aranet4 ----------
+// Pressure counts as fresh only if the Aranet4 measured it recently. Stale pressure is never
+// used to compute actual O2, so a dropped connection can't cause false highs or lows.
+const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(what + ' timed out')), ms))]);
+// Fresh = we heard from the Aranet4, and its measurement is no older than one measurement
+// interval plus 30 s.
+// Reads are timed to the sensor's own measurement interval, so contact is expected about once
+// per interval; allow the same margin as for the measurement itself.
+function contactLimitMs(){ return staleLimitMs(); }
+function staleLimitMs(){ return ((aranet && aranet.interval) ? aranet.interval * 1000 : 60000) + 30000; }
+function pressureAge(){ return aranet && aranet.measuredAt ? Date.now() - aranet.measuredAt : Infinity; }
+function contactAge(){ return aranet && aranet.lastContact ? Date.now() - aranet.lastContact : Infinity; }
+function pressureFresh(){ return !!(aranet && aranet.kpa && contactAge() <= contactLimitMs() && pressureAge() <= staleLimitMs()); }
+
+async function getAranetChar(server){
+  for (const svc of ARANET_SERVICES){
+    try {
+      const s = await server.getPrimaryService(svc);
+      return await s.getCharacteristic(ARANET_READINGS);
+    } catch(e) { /* try the other service UUID */ }
+  }
+  throw new Error('Aranet4 readings service not found');
+}
+async function aranetConnect(){
+  const server = await withTimeout(aranet.device.gatt.connect(), 15000, 'Connect');
+  aranet.char = await withTimeout(getAranetChar(server), 10000, 'Service lookup');
+  if (!aranet.drops) dlog('Aranet4: connected');
+}
+function applyAranet(d, source){
+  const now = Date.now();
+  const measuredAt = now - (d.ago != null ? d.ago * 1000 : 0);
+  if (aranet.measuredAt && measuredAt < aranet.measuredAt - 5000) return; // older than what we have
+  if (d.hPa != null) aranet.kpa = d.hPa / 10;
+  if (aranet.fails >= 2) dlog(`Aranet4: readings back after ${aranet.fails} failed attempts`);
+  const isNew = !aranet.measuredAt || measuredAt > aranet.measuredAt + 5000;
+  Object.assign(aranet, { tempC:d.tempC, rh:d.rh, co2:d.co2, interval:d.interval || aranet.interval, measuredAt, lastContact: now, source, everOk:true, fails:0 });
+  // Next read: shortly after the sensor's next measurement; if this one wasn't new, look again in 10 s.
+  const iv = (aranet.interval || 60) * 1000;
+  aranet.nextReadAt = isNew ? Math.max(now + 5000, measuredAt + iv + 4000) : now + 10000;
+  clearMsgIfAbout('Aranet4');
+  if (d.co2 != null) { $('co2').innerHTML = `${d.co2} <small>ppm</small>`; $('gCO2').innerHTML = `${d.co2}<small>ppm</small>`; }
+  updateAranetStatus();
+}
+function updateAranetStatus(){
+  if (!aranet) return;
+  const fresh = pressureFresh(), age = pressureAge();
+  $('aDot').className = fresh ? 'dot on' : 'dot wait';
+  const parts = [];
+  if (aranet.kpa) parts.push(`${aranet.kpa.toFixed(2)} kPa`, `${aranet.tempC.toFixed(1)} °C`, `${aranet.rh}% RH`);
+  if (isFinite(age)) parts.push(`measured ${Math.round(age/1000)} s ago`);
+  if (aranet.source === 'broadcast') parts.push('via broadcast');
+  if (aranet.reconnecting) parts.push('reconnecting…');
+  $('aDetail').textContent = parts.length ? parts.join(' · ') : 'Waiting for first reading…';
+  updateStale();
+}
+let aranetBusy = false;
+async function pollAranet(){
+  if (!aranet || aranetBusy) return;
+  aranetBusy = true;
+  try {
+    for (let attempt = 1; attempt <= 2; attempt++){
+      try {
+        if (!aranet.char || !aranet.device.gatt.connected){ aranet.reconnecting = true; updateAranetStatus(); await aranetConnect(); aranet.reconnecting = false; }
+        const dv = await withTimeout(aranet.char.readValue(), 8000, 'Read');
+        aranet.reconnecting = false;
+        applyAranet(decodeAranet(dv), 'connection');
+        return;
+      } catch(e) {
+        aranet.fails = (aranet.fails || 0) + 1;
+        // One failure right after a drop is normal (the read was in flight); only flag repeats.
+        if (aranet.fails === 2 || aranet.fails % 10 === 0) dlog(`Aranet4: ${e.name && e.name !== 'Error' ? e.name + ': ' : ''}${e.message || e} (failure ${aranet.fails}, still retrying)`, true);
+        // Drop the connection completely and start fresh; a half-open link otherwise fails forever.
+        aranet.char = null; aranet.selfClose = true;
+        try { aranet.device.gatt.disconnect(); } catch(_) {}
+        aranet.reconnecting = true;
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+    aranet.nextReadAt = Date.now() + Math.min(30000, 5000 * aranet.fails);   // both tries failed: back off
+  } finally { aranetBusy = false; updateAranetStatus(); }
+}
+// Backup: Aranet4 broadcasts its readings when "Smart Home integrations" is on in Aranet Home.
+function decodeAranetAdvert(dv){
+  if (!dv || dv.byteLength < 21) return null;
+  if (!(dv.getUint8(0) & 0x20)) return null; // integrations off
+  const co2 = dv.getUint16(8, true), tRaw = dv.getUint16(10, true), pRaw = dv.getUint16(12, true);
+  return { co2: (co2 >> 15) ? null : co2, tempC: tRaw / 20, hPa: (pRaw >> 15) ? null : pRaw / 10,
+           rh: dv.getUint8(14), batt: dv.getUint8(15), interval: dv.getUint16(17, true), ago: dv.getUint16(19, true) };
+}
+async function startAdvertWatch(device){
+  if (typeof device.watchAdvertisements !== 'function'){ dlog('Aranet4: broadcast backup not supported by this browser'); return; }
+  try {
+    device.addEventListener('advertisementreceived', ev => {
+      if (!aranet || aranet.device !== device) return;
+      const md = ev.manufacturerData && ev.manufacturerData.get(0x0702);
+      const d = decodeAranetAdvert(md);
+      if (!d){ if (md && !aranet.advWarned){ aranet.advWarned = true; dlog('Aranet4: turn on Smart Home integrations in Aranet Home to get backup readings'); } return; }
+      if (!aranet.advSeen){ aranet.advSeen = true; dlog('Aranet4: receiving backup readings from broadcasts'); }
+      applyAranet(d, 'broadcast');
+    });
+    await device.watchAdvertisements();
+    dlog('Aranet4: listening for broadcasts as a backup');
+  } catch(e) { dlog(`Aranet4: broadcast backup unavailable (${e.message || e})`); }
+}
+async function connectAranet(){
+  unlockAudio(); msg('');
+  if (!navigator.bluetooth) { msg('This browser has no Bluetooth access. On iPhone, open this page in the Bluefy browser.'); dlog('navigator.bluetooth missing', true); return; }
+  try {
+    $('aDot').className = 'dot wait'; $('aDetail').textContent = 'Choose your Aranet4 in the list…';
+    const device = await chooser('Aranet', ARANET_SERVICES);
+    dlog(`Aranet4: picked "${device.name || 'unnamed'}"`);
+    for (let i = 0; i < 40 && aranetBusy; i++) await new Promise(r => setTimeout(r, 250));   // let a background reconnect finish
+    if (aranet && aranet.device !== device) { try { aranet.device.gatt.disconnect(); } catch(_) {} }
+    if (aranet && aranet.device === device && aranet.char && device.gatt.connected) { aranet.nextReadAt = 0; await pollAranet(); $('aBtn').textContent = 'Reconnect'; return; }
+    aranet = { device, char:null, fails:0 };
+    $('aDetail').textContent = 'Connecting… (iOS may ask for the PIN shown on the Aranet4 screen)';
+    device.addEventListener('gattserverdisconnected', () => {
+      if (!aranet || aranet.device !== device) return;
+      aranet.char = null;
+      if (aranet.selfClose) { aranet.selfClose = false; return; }   // we closed it ourselves
+      aranet.drops = (aranet.drops || 0) + 1;
+      // The Aranet4 closes idle links on its own. Nothing is lost: we reconnect at the next
+      // scheduled read, which is when the next measurement is ready anyway.
+      dlog(`Aranet4: link closed by sensor (${aranet.drops} so far) — reconnects at next read`);
+      updateAranetStatus();
+    });
+    await aranetConnect();
+    $('aName').textContent = device.name || 'Aranet4';
+    $('aBtn').textContent = 'Reconnect';
+    await pollAranet();
+    startAdvertWatch(device);
+    keepAwake();
+  } catch(e) {
+    $('aDot').className = aranet && aranet.everOk ? 'dot wait' : 'dot';
+    if (!(aranet && aranet.everOk)) $('aDetail').textContent = 'Not connected';
+    msg(explain(e, 'Aranet4'), 'Aranet4');
+  }
+}
+setInterval(() => { if (aranet && Date.now() >= (aranet.nextReadAt || 0)) pollAranet(); }, 2000);
+
+// ---------- stale-pressure warning ----------
+function lowBeep(){
+  if (!audioCtx) return;
+  try {
+    const now = audioCtx.currentTime;
+    [0, 0.35].forEach(off => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = 'sine'; o.frequency.value = 660;
+      g.gain.setValueAtTime(0.3, now + off); g.gain.setValueAtTime(0, now + off + 0.25);
+      o.connect(g).connect(audioCtx.destination); o.start(now + off); o.stop(now + off + 0.26);
+    });
+  } catch(e) {}
+}
+function updateStale(){
+  const issues = [];
+  const pStale = !!(aranet && aranet.everOk && !pressureFresh());
+  const vStale = !!(vBt && !vernierFresh());
+  const fmt = ms => { const sec = Math.round(ms / 1000); return sec < 120 ? `${sec} s` : `${Math.round(sec / 60)} min`; };
+  if (vStale) issues.push(`No O₂ readings from the Vernier for ${fmt(vernierAge())}`);
+  if (pStale) issues.push(`No fresh pressure for ${fmt(Math.min(pressureAge(), contactAge()))}`);
+  $('stale').hidden = !issues.length;
+  if (!issues.length){ staleSilenced = false; return; }
+  if (vStale) checkAlarm(null);
+  $('staleText').textContent = issues.join(' · ');
+  $('staleSub').textContent = 'Actual O₂ and the O₂ alarm are paused. The app is reconnecting on its own; other readings keep logging.';
+  const long = (vStale && vernierAge() > 60000) || (pStale && contactAge() > 90000);
+  if (!staleSilenced && long && Date.now() - staleBeepAt > 30000){ staleBeepAt = Date.now(); lowBeep(); }
+}
+$('staleAck').addEventListener('click', () => { staleSilenced = true; });
+
+// ---------- minute logger ----------
+let nextTick = Math.ceil(Date.now() / 60000) * 60000;
+// iOS freezes the page when the screen locks or dims, or when another app is in front. While
+// frozen nothing runs: no readings, no logging, no alarm. Detect it so the log says so plainly,
+// and recover both sensors straight away when the page wakes up.
+let lastTickAt = Date.now(), pauseCount = 0;
+async function tick(){
+  const now = Date.now();
+  const gap = now - lastTickAt; lastTickAt = now;
+  if (gap > 5000 && (vBt || aranet)) {
+    pauseCount++;
+    const sec = Math.round(gap / 1000);
+    dlog(`App was PAUSED by iOS for ${sec < 120 ? sec + ' s' : Math.round(sec / 60) + ' min'} (screen lock/dim or app switch; pause #${pauseCount}) — no readings or alarm during that time`, true);
+    if (aranet) aranet.nextReadAt = 0;      // read pressure now
+    vRestartAt = 0; vReconnectAt = 0;       // let the Vernier watchdog act now
+  }
+  const secs = Math.max(0, Math.round((nextTick - now)/1000));
+  $('countdown').textContent = !settings.recording ? 'Stopped' : (vDevice || aranet || DEMO) ? `${secs} s` : '—';
+  updateAranetStatus(); updateVernierStatus(); updateStale();
+  if (now < nextTick) return;
+  nextTick = Math.ceil((now + 1) / 60000) * 60000;
+  if (!settings.recording) { vSamples = []; if (viewEnd == null) draw(); return; }
+  // Use this minute's Vernier samples; never reuse an old value.
+  const fresh = vernierFresh() ? vSamples : [];
+  vSamples = [];
+  const haveO2 = fresh.length > 0, ok = pressureFresh();
+  if (!haveO2 && !ok) {
+    if (vBt || aranet) $('stamp').textContent = 'Not logging: no fresh readings from either sensor';
+    if (viewEnd == null) draw();
+    return;
+  }
+  const raw = haveO2 ? fresh.reduce((a,b)=>a+b,0) / fresh.length : null;
+  const c = haveO2 && ok ? compute(raw, aranet.kpa) : { actual:null, po2Atm: haveO2 ? raw / 100 * settings.refP : null };
+  const age = pressureAge();
+  const row = { t: now, raw, kpa: ok ? aranet.kpa : null, actual: c.actual, po2Atm: c.po2Atm,
+    tempC: ok ? aranet.tempC : null, rh: ok ? aranet.rh : null, co2: ok ? (aranet.co2 ?? null) : null,
+    pAge: isFinite(age) ? Math.round(age / 1000) : null, s: settings.sessionStart };
+  log.push(row); save();
+  showRow(row); checkAlarm(c.actual); draw();
+}
+setInterval(tick, 1000);
+
+function showRow(r){
+  $('o2Actual').innerHTML = r.actual != null ? `${r.actual.toFixed(1)}<small>%</small>` : `—<small>%</small>`;
+  $('gO2').innerHTML = $('o2Actual').innerHTML;
+  $('pAtm').innerHTML = r.kpa != null ? `${(r.kpa / STD_ATM_KPA).toFixed(3)} <small>atm</small>` : `— <small>atm · no fresh reading</small>`;
+  $('pO2').innerHTML = r.po2Atm != null ? `${r.po2Atm.toFixed(3)} <small>atm · ${(r.po2Atm*STD_ATM_KPA).toFixed(1)} kPa</small>` : `— <small>atm</small>`;
+  $('o2Raw').innerHTML = r.raw != null ? `${r.raw.toFixed(2)} <small>%</small>` : `— <small>%</small>`;
+  if (r.co2 != null) { $('co2').innerHTML = `${r.co2} <small>ppm</small>`; $('gCO2').innerHTML = `${r.co2}<small>ppm</small>`; }
+  $('stamp').textContent = 'Last reading ' + new Date(r.t).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+  $('logCount').textContent = `${log.length} reading${log.length===1?'':'s'}` + (log.length ? ` since ${new Date(log[0].t).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})}` : '');
+}
+
+// ---------- chart ----------
+function css(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function niceTicks(min, max, target){
+  if (!(max > min)) max = min + 1;
+  const raw = (max - min) / target, mag = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / mag;
+  const step = +((n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag).toFixed(10);
+  const lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step, ticks = [];
+  for (let v = lo; v <= hi + step * 1e-6; v += step) ticks.push(+v.toFixed(10));
+  const dec = Math.min(3, (String(step).split('.')[1] || '').length);
+  return { lo, hi, ticks, dec };
+}
+const fmtTime = t => new Date(t).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+// Live view works like a chart recorder: when the readings in the last window don't fill it,
+// the window starts at the first of them so the trace grows from left to right.
+function liveEnd(){
+  const now = Date.now(), span = rangeH * 3600e3;
+  const first = log.find(r => r.t >= now - span);
+  return first ? Math.max(now, first.t + span) : now;
+}
+function earliestEnd(){
+  const span = rangeH * 3600e3, le = liveEnd();
+  return log.length ? Math.min(le, log[0].t + span) : le;
+}
+function windowBounds(){
+  const now = Date.now();
+  if (!rangeH){ const t0 = log.length ? log[0].t : now - 3600e3; return { t0, t1: Math.max(now, t0 + 60e3) }; }
+  const t1 = viewEnd ?? liveEnd();
+  return { t0: t1 - rangeH * 3600e3, t1 };
+}
+function draw(){
+  const cv = $('chart'), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = 460;
+  cv.width = W * dpr; cv.height = H * dpr; cv.style.height = H + 'px';
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+  const ink = css('--muted'), line = css('--line'), acc = css('--accent'), prs = css('--press'), alm = css('--alarm'), cc = css('--co2');
+  ctx.font = '11px ' + css('--display');
+
+  const { t0, t1 } = windowBounds();
+  const span = Math.max(t1 - t0, 60e3);
+  const rows = log.filter(r => r.t >= t0 - 5*60e3 && r.t <= t1 + 5*60e3);
+  const inView = rows.filter(r => r.t >= t0 && r.t <= t1);
+
+  const L = 46, R = 50, gap = 30;
+  const top1 = 10, h1 = 156, top2 = top1 + h1 + gap, h2 = 98, top3 = top2 + h2 + gap, h3 = H - top3 - 24;
+  const pw = W - L - R;
+  const xOf = t => L + (t - t0) / span * pw;
+
+  // scales from the visible rows
+  let oMin = 19, oMax = Math.max(settings.limit + 0.5, 24);
+  inView.forEach(r => { if (r.actual != null) { oMin = Math.min(oMin, r.actual - 0.5); oMax = Math.max(oMax, r.actual + 0.5); } });
+  const oS = niceTicks(oMin, oMax, 5);
+  const yO = v => top1 + h1 - (v - oS.lo) / (oS.hi - oS.lo) * h1;
+  let pMin = Infinity, pMax = -Infinity;
+  inView.forEach(r => { if (r.kpa != null) { const p = r.kpa / STD_ATM_KPA; pMin = Math.min(pMin, p); pMax = Math.max(pMax, p); } });
+  if (!isFinite(pMin)) { pMin = 0.74; pMax = 0.76; }
+  if (pMax - pMin < 0.01) { const m = (pMax + pMin) / 2; pMin = m - 0.005; pMax = m + 0.005; }
+  const pS = niceTicks(pMin, pMax, 4);
+  const yP = v => top2 + h2 - (v - pS.lo) / (pS.hi - pS.lo) * h2;
+  let cMin = Infinity, cMax = -Infinity;
+  inView.forEach(r => { if (r.co2 != null) { cMin = Math.min(cMin, r.co2); cMax = Math.max(cMax, r.co2); } });
+  if (!isFinite(cMin)) { cMin = 400; cMax = 800; }
+  const cS = niceTicks(Math.max(0, cMin - 50), cMax + 50, 4);
+  const yC = v => top3 + h3 - (v - cS.lo) / (cS.hi - cS.lo) * h3;
+
+  // O2-supply-off periods: shaded band across all three graphs, with a line and label at each mark
+  if (events.length){
+    const wc = css('--warn');
+    ctx.save(); ctx.beginPath(); ctx.rect(L, 0, pw, H - 22); ctx.clip();
+    ctx.fillStyle = wc; ctx.globalAlpha = .16;
+    events.forEach((e, i) => {
+      if (e.on) return;
+      const a = e.t, b = i + 1 < events.length ? events[i + 1].t : Date.now();
+      if (b < t0 || a > t1) return;
+      ctx.fillRect(xOf(a), top1, xOf(b) - xOf(a), top3 + h3 - top1);
+    });
+    ctx.globalAlpha = 1; ctx.lineWidth = 1.5; ctx.textBaseline = 'top'; ctx.font = '600 10px ' + css('--display');
+    const laneEnd = [-Infinity, -Infinity, -Infinity];   // labels stack in up to 3 rows so they never overlap
+    events.forEach(e => {
+      if (e.t < t0 || e.t > t1) return;
+      const x = Math.round(xOf(e.t)) + .5;
+      ctx.strokeStyle = e.on ? css('--ok') : wc;
+      ctx.beginPath(); ctx.moveTo(x, top1); ctx.lineTo(x, top3 + h3); ctx.stroke();
+      const lab = e.on ? 'O₂ on' : 'O₂ off', w = ctx.measureText(lab).width;
+      const lx = Math.min(x + 3, L + pw - w - 2);
+      const lane = laneEnd.findIndex(end => lx > end + 4);
+      if (lane < 0) return;                                 // too crowded: line only (zoom in to see labels)
+      laneEnd[lane] = lx + w;
+      const ly = top1 + h1 - 13 - lane * 14;
+      ctx.fillStyle = css('--panel'); ctx.fillRect(lx - 1, ly - 1, w + 2, 13);
+      ctx.fillStyle = e.on ? css('--ok') : wc; ctx.fillText(lab, lx, ly);
+    });
+    ctx.restore(); ctx.font = '11px ' + css('--display'); ctx.lineWidth = 1;
+  }
+
+  // grid + y labels
+  ctx.strokeStyle = line; ctx.fillStyle = ink; ctx.lineWidth = 1; ctx.textBaseline = 'middle'; ctx.textAlign = 'right';
+  const grid = (S, yf, fmt) => S.ticks.forEach(v => { const y = Math.round(yf(v)) + .5; ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(L+pw,y); ctx.stroke(); ctx.fillText(fmt(v), L-6, y); });
+  grid(oS, yO, v => v.toFixed(oS.dec) + '%');
+  grid(pS, yP, v => v.toFixed(pS.dec));
+  grid(cS, yC, v => String(Math.round(v)));
+  ctx.textAlign = 'left'; ctx.fillStyle = acc; ctx.fillText('O₂ %', L+4, top1+8);
+  ctx.fillStyle = prs; ctx.fillText('atm', L+4, top2+8);
+  ctx.fillStyle = cc; ctx.fillText('CO₂ ppm', L+4, top3+8);
+
+  // limit + 20.9 reference
+  ctx.setLineDash([5,4]);
+  ctx.strokeStyle = alm; ctx.beginPath(); ctx.moveTo(L, yO(settings.limit)); ctx.lineTo(L+pw, yO(settings.limit)); ctx.stroke();
+  ctx.fillStyle = alm; ctx.fillText(settings.limit + '%', L+pw+4, yO(settings.limit));
+  ctx.strokeStyle = ink; ctx.globalAlpha = .6; ctx.beginPath(); ctx.moveTo(L, yO(20.9)); ctx.lineTo(L+pw, yO(20.9)); ctx.stroke(); ctx.globalAlpha = 1;
+  ctx.fillStyle = ink; ctx.fillText('20.9', L+pw+4, yO(20.9));
+  ctx.setLineDash([]);
+
+  // solid dividers between the three graphs
+  ctx.strokeStyle = css('--ink'); ctx.globalAlpha = .45; ctx.lineWidth = 1.5;
+  [top2 - gap / 2, top3 - gap / 2].forEach(y => { y = Math.round(y) + .5; ctx.beginPath(); ctx.moveTo(4, y); ctx.lineTo(W - 4, y); ctx.stroke(); });
+  ctx.globalAlpha = 1; ctx.lineWidth = 1;
+
+  // x labels
+  ctx.fillStyle = ink; ctx.textBaseline = 'top';
+  const nx = Math.max(2, Math.min(6, Math.floor(pw / 95)));
+  for (let i = 0; i <= nx; i++){
+    const t = t0 + span * i / nx;
+    ctx.textAlign = i === 0 ? 'left' : i === nx ? 'right' : 'center';
+    ctx.fillText(fmtTime(t), xOf(t), H - 16);
+  }
+
+  if (!rows.length){
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = '13px ' + css('--body');
+    ctx.font = '12px ' + css('--body');
+    ctx.fillText(log.length ? 'No readings in this time window' : 'Waiting for the first reading', L + pw/2, top1 + h1/2);
+    updatePanUI(t0, t1);
+    return;
+  }
+  ctx.save(); ctx.beginPath(); ctx.rect(L, 0, pw, H); ctx.clip();
+  const series = (yf, val, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.beginPath();
+    let prevT = null, last = null;
+    rows.forEach(r => { const v = val(r); if (v == null) { prevT = null; return; } const x = xOf(r.t), y = yf(v); if (prevT == null || r.t - prevT > 5*60e3) ctx.moveTo(x,y); else ctx.lineTo(x,y); prevT = r.t; last = r; });
+    ctx.stroke();
+    if (last && last.t <= t1) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(xOf(last.t), yf(val(last)), 3.5, 0, 7); ctx.fill(); }
+  };
+  series(yO, r => r.actual, acc);
+  series(yP, r => r.kpa != null ? r.kpa / STD_ATM_KPA : null, prs);
+  series(yC, r => r.co2 ?? null, cc);
+  ctx.restore();
+  updatePanUI(t0, t1);
+}
+function updatePanUI(t0, t1){
+  const live = !rangeH || viewEnd == null;
+  $('panLive').hidden = live;
+  $('panBack').disabled = !rangeH || t1 <= earliestEnd() + 1000;
+  $('panFwd').disabled = !rangeH || viewEnd == null;
+  $('panLabel').textContent = !rangeH ? 'All readings' : (viewEnd == null ? `Live · ${fmtTime(t0)} – ${fmtTime(t1)}` : `${fmtTime(t0)} – ${fmtTime(t1)}`);
+}
+function clampEnd(t){
+  const le = liveEnd();
+  t = Math.max(earliestEnd(), Math.min(le, t));
+  return (le - t < 30e3) ? null : t;
+}
+function setViewEnd(t){ if (!rangeH) return; viewEnd = clampEnd(t); draw(); }
+let drawQueued = false;
+function queueDraw(){ if (!drawQueued){ drawQueued = true; requestAnimationFrame(() => { drawQueued = false; draw(); }); } }
+(() => {
+  const cv = $('chart'); let drag = null;
+  cv.addEventListener('pointerdown', e => { if (!rangeH) return; drag = { x: e.clientX, end: viewEnd ?? liveEnd() }; try { cv.setPointerCapture(e.pointerId); } catch(_) {} });
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const span = rangeH * 3600e3, pw = cv.clientWidth - 96;
+    viewEnd = clampEnd(drag.end - (e.clientX - drag.x) / pw * span);
+    queueDraw();
+  });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(n => cv.addEventListener(n, () => { drag = null; }));
+})();
+$('panBack').addEventListener('click', () => { const span = rangeH * 3600e3; setViewEnd((viewEnd ?? liveEnd()) - span / 2); });
+$('panFwd').addEventListener('click', () => { const span = rangeH * 3600e3; setViewEnd((viewEnd ?? liveEnd()) + span / 2); });
+$('panLive').addEventListener('click', () => { viewEnd = null; draw(); });
+window.addEventListener('resize', draw);
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', draw);
+$('range').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  rangeH = +b.dataset.h;
+  $('range').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b));
+  if (viewEnd != null) setViewEnd(viewEnd); else draw();
+});
+
+// ---------- O2 supply marks ----------
+const fmtClock = t => new Date(t).toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
+const fmtDur = ms => { const m = Math.floor(ms / 60000), h = Math.floor(m / 60); return h ? `${h} h ${m % 60} min` : m ? `${m} min` : `${Math.floor(ms / 1000)} s`; };
+let undoTimer = null;
+function markSupply(on){
+  const cur = events.length ? events[events.length - 1].on : null;
+  if (cur === on) return;                       // already in that state
+  const ev = { t: Date.now(), on, s: settings.recording ? settings.sessionStart : null };
+  events.push(ev); saveEvents();
+  dlog(`O₂ supply marked ${on ? 'ON' : 'OFF'}`);
+  $('supUndo').hidden = false; clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => { $('supUndo').hidden = true; }, 30000);
+  updateSupplyUI(); draw();
+}
+function updateSupplyUI(){
+  const last = events[events.length - 1];
+  $('supOn').setAttribute('aria-pressed', !!(last && last.on));
+  $('supOff').setAttribute('aria-pressed', !!(last && !last.on));
+  $('supState').textContent = last ? `${last.on ? 'ON' : 'OFF'} since ${fmtTime(last.t)} · ${fmtDur(Date.now() - last.t)}` : 'Not marked yet';
+  const recent = events.slice(-20).reverse();
+  $('supHist').innerHTML = '';
+  recent.forEach((e, i) => {
+    const li = document.createElement('li');
+    const next = recent[i - 1];
+    li.textContent = `${fmtClock(e.t)}  O₂ ${e.on ? 'ON ' : 'OFF'}` + (next ? `  (${fmtDur(next.t - e.t)})` : '');
+    $('supHist').appendChild(li);
+  });
+}
+$('supOn').addEventListener('click', () => markSupply(true));
+$('supOff').addEventListener('click', () => markSupply(false));
+$('supUndo').addEventListener('click', () => {
+  const ev = events.pop(); saveEvents(); $('supUndo').hidden = true;
+  if (ev) dlog(`O₂ supply mark (${ev.on ? 'ON' : 'OFF'} at ${fmtClock(ev.t)}) undone`);
+  updateSupplyUI(); draw();
+});
+setInterval(() => { if (events.length) updateSupplyUI(); }, 15000);
+
+// ---------- CSV ----------
+function csv(rows = log, evRange = null){
+  const head = 'timestamp_iso,local_time,vernier_raw_o2_pct,pressure_kpa,pressure_atm,o2_partial_pressure_atm,o2_partial_pressure_kpa,actual_o2_pct,aranet_temp_c,aranet_rh_pct,co2_ppm,pressure_age_s,session_start,o2_supply,event';
+  const sup = t => { const v = supplyAt(t); return v == null ? '' : v ? 'on' : 'off'; };
+  const lines = rows.map(r => [
+    new Date(r.t).toISOString(),
+    '"' + new Date(r.t).toLocaleString() + '"',
+    r.raw != null ? r.raw.toFixed(3) : '', r.kpa != null ? r.kpa.toFixed(2) : '', r.kpa != null ? (r.kpa/STD_ATM_KPA).toFixed(4) : '',
+    r.po2Atm != null ? r.po2Atm.toFixed(4) : '', r.po2Atm != null ? (r.po2Atm*STD_ATM_KPA).toFixed(2) : '', r.actual != null ? r.actual.toFixed(2) : '',
+    r.tempC != null ? r.tempC.toFixed(1) : '', r.rh != null ? r.rh : '', r.co2 != null ? r.co2 : '', r.pAge != null ? r.pAge : '', r.s ? '"' + new Date(r.s).toLocaleString() + '"' : '',
+    sup(r.t), ''
+  ].join(',')).map((line, i) => ({ t: rows[i].t, line }));
+  // Supply marks become their own rows, in time order, so none are lost between readings.
+  const t0 = rows.length ? rows[0].t : -Infinity, t1 = rows.length ? rows[rows.length - 1].t : Infinity;
+  const evs = (evRange ? events.filter(e => e.t >= evRange[0] && e.t <= evRange[1]) : events.filter(e => e.t >= t0 - 60e3 && e.t <= Math.max(t1, Date.now())))
+    .map(e => ({ t: e.t, line: [new Date(e.t).toISOString(), '"' + new Date(e.t).toLocaleString() + '"', '', '', '', '', '', '', '', '', '', '', e.s ? '"' + new Date(e.s).toLocaleString() + '"' : '', e.on ? 'on' : 'off', e.on ? 'O2 ON' : 'O2 OFF'].join(',') }));
+  const all = lines.concat(evs).sort((a, b) => a.t - b.t).map(x => x.line);
+  return [head, ...all].join('\n') + '\n';
+}
+function fname(prefix = 'o2-log', t = Date.now()){ const d = new Date(t); const p = n => String(n).padStart(2,'0'); return `${prefix}-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.csv`; }
+$('shareBtn').addEventListener('click', () => {
+  if (!log.length) { msg('The log is empty.'); return; }
+  shareCsv(csv(), fname());
+});
+async function shareCsv(text, name){
+  const file = new File([text], name, {type:'text/csv'});
+  try {
+    if (navigator.canShare && navigator.canShare({files:[file]})) { await navigator.share({files:[file], title:name}); return; }
+  } catch(e) { if (e.name === 'AbortError') return; }
+  try {
+    const url = URL.createObjectURL(file); const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    msg('CSV saved. If nothing appeared, use Copy CSV.');
+  } catch(e) { showFallback(text); }
+}
+// ---------- sessions ----------
+function sessionRows(start){ return log.filter(r => r.s === start); }
+function updateRecUI(){
+  const b = $('recBtn');
+  b.textContent = settings.recording ? '■ Stop & save' : '● Start session';
+  b.classList.toggle('start', !settings.recording);
+  $('sessBtn').hidden = !(settings.lastSession && sessionRows(settings.lastSession).length);
+}
+function exportSession(start){
+  const rows = sessionRows(start);
+  if (!rows.length) { msg('That session has no readings.'); return; }
+  const end = (settings.recording && settings.sessionStart === start) ? Date.now() : (settings.lastSessionEnd || rows[rows.length - 1].t);
+  shareCsv(csv(rows, [start, end]), fname('o2-session', start));
+}
+$('recBtn').addEventListener('click', () => {
+  if (settings.recording){
+    const start = settings.sessionStart;
+    settings.recording = false; settings.lastSession = start; settings.lastSessionEnd = Date.now(); saveSettings(); updateRecUI();
+    const n = sessionRows(start).length;
+    $('stamp').textContent = `Stopped · session saved (${n} reading${n === 1 ? '' : 's'})`;
+    if (n) exportSession(start); else msg('Recording stopped. That session had no readings.');
+  } else {
+    settings.recording = true; settings.sessionStart = Date.now(); saveSettings(); updateRecUI();
+    nextTick = Math.ceil((Date.now() + 1) / 60000) * 60000; vSamples = [];
+    $('stamp').textContent = 'New session started'; msg('');
+    viewEnd = null; draw();
+  }
+});
+$('sessBtn').addEventListener('click', () => exportSession(settings.lastSession));
+function showFallback(text){ const ta = $('csvFallback'); ta.value = text; ta.hidden = false; ta.focus(); ta.select(); msg('Select all and copy the CSV text below.'); }
+$('copyBtn').addEventListener('click', async () => {
+  if (!log.length) { msg('The log is empty.'); return; }
+  const text = csv();
+  try { await navigator.clipboard.writeText(text); msg(`Copied ${log.length} rows to the clipboard.`); } catch(e) { showFallback(text); }
+});
+let clearTimer;
+$('clearBtn').addEventListener('click', () => { $('clearConfirm').hidden = false; clearTimeout(clearTimer); clearTimer = setTimeout(() => $('clearConfirm').hidden = true, 4000); });
+$('clearConfirm').addEventListener('click', () => { log = []; save(); events = []; saveEvents(); updateSupplyUI(); $('clearConfirm').hidden = true; $('logCount').textContent = '0 readings'; draw(); msg('Log cleared.'); });
+
+// ---------- settings ----------
+$('limit').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0) { settings.limit = v; saveSettings(); draw(); } });
+$('refP').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0.3 && v < 1.5) { settings.refP = v; saveSettings(); msg('Calibration pressure changed. New readings use it; earlier log rows keep their values.'); } });
+
+$('vBtn').addEventListener('click', connectVernier);
+$('aBtn').addEventListener('click', connectAranet);
+
+// ---------- demo (?demo) for testing without hardware ----------
+if (DEMO){
+  const t = Date.now();
+  for (let i = 300; i > 0; i--){
+    const kpa = 75.9 + 0.25*Math.sin(i/90);
+    const raw = 20.9 * (kpa/STD_ATM_KPA) + (i < 40 ? (40-i)*0.03 : 0) + (Math.random()-.5)*0.05;
+    const c = compute(raw, kpa);
+    log.push({t: t - i*60e3, raw, kpa, actual:c.actual, po2Atm:c.po2Atm, tempC:21.4, rh:28, co2: Math.round(520 + 180*Math.sin(i/45) + (i < 60 ? (60-i)*4 : 0))});
+  }
+  aranet = {device:{gatt:{connected:true, disconnect(){}}}, char:{readValue: async () => new DataView(new Uint8Array([0x90,0x01, 0xAC,0x01, 0xA6,0x1D, 28, 90, 1, 60,0, 12,0]).buffer)}, kpa: 75.9, everOk:true, measuredAt: Date.now(), lastContact: Date.now(), interval:60, tempC:21.4, rh:28, co2:400};
+}
+if (/[?&]test\b/.test(location.search)) {
+  window.__t = { setVBt: b => { vBt = b; }, onVernierValue, decodeAranetAdvert, setVDevice: v => { vDevice = v; }, get log(){ return log; } };
+}
+
+updateRecUI(); updateSupplyUI();
+if (log.length) showRow(log[log.length-1]);
+if (!settings.recording) $('stamp').textContent = 'Stopped · tap Start session to record';
+$('logCount').textContent = `${log.length} reading${log.length===1?'':'s'}`;
+draw();
+})();
+</script>
+</body>
+</html>
