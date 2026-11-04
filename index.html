@@ -109,6 +109,14 @@ canvas{width:100%;display:block}
 .diag summary{cursor:pointer}
 .diag ol{margin:0;padding:0;list-style:none;font:.75rem/1.5 var(--display);color:var(--muted);max-height:220px;overflow:auto;overflow-wrap:anywhere}
 .diag li.bad{color:var(--alarm)}
+/* O2 supply marker */
+.supply{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.supply-btns{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.supply-btns button{min-height:64px;font:600 1.1rem var(--display);letter-spacing:.02em}
+.supply-btns button[aria-pressed="true"]#supOn{background:var(--ok);border-color:var(--ok);color:var(--panel)}
+.supply-btns button[aria-pressed="true"]#supOff{background:var(--warn);border-color:var(--warn);color:var(--alarm-ink)}
+.supply-state{font:.85rem var(--display);color:var(--muted);font-variant-numeric:tabular-nums}
+.supply-hist{margin:0;padding:0;list-style:none;font:.75rem/1.5 var(--display);color:var(--muted);max-height:96px;overflow:auto}
 textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px}
 @media (max-width:520px){
   .devices{grid-template-columns:1fr}
@@ -119,7 +127,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 <body>
 <main>
   <header>
-    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v11</span></h1>
+    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v13</span></h1>
     <p class="sub">Vernier Go Direct O₂ corrected by Aranet4 barometric pressure. Logs once per minute.</p>
   </header>
 
@@ -166,6 +174,19 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
     <div class="stamp"><span id="stamp">Waiting for both sensors</span></div>
   </section>
 
+  <section class="supply" aria-label="Oxygen supply">
+    <div class="row"><span class="label">Oxygen supply</span><span class="supply-state" id="supState">Not marked yet</span></div>
+    <div class="supply-btns" role="group" aria-label="Mark oxygen supply on or off">
+      <button id="supOn" type="button" aria-pressed="false">O₂ ON</button>
+      <button id="supOff" type="button" aria-pressed="false">O₂ OFF</button>
+    </div>
+    <div class="row">
+      <span class="note">Tap when oxygen is turned off or back on. Each change is time-stamped, shaded on the graph and saved in the CSV.</span>
+      <button id="supUndo" type="button" hidden>Undo last mark</button>
+    </div>
+    <ol class="supply-hist" id="supHist" aria-label="Oxygen supply changes"></ol>
+  </section>
+
   <section class="card" aria-label="Graph">
     <div class="row">
       <div class="gread" aria-live="polite">
@@ -190,6 +211,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
       <span><i style="background:var(--press)"></i>Pressure, atm</span>
       <span><i style="background:var(--co2)"></i>CO₂, ppm</span>
       <span><i style="background:var(--alarm)"></i>Alarm limit</span>
+      <span><i style="background:var(--warn);height:10px;opacity:.35"></i>O₂ supply off</span>
     </div>
     <div class="pan">
       <button id="panBack" type="button" aria-label="Show earlier">‹ Earlier</button>
@@ -229,8 +251,8 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 'use strict';
 const $ = id => document.getElementById(id);
 const STD_ATM_KPA = 101.325;
-const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1';
-const APP_VERSION = '11';
+const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1', EVENTS = 'o2mon.events.v1';
+const APP_VERSION = '13';
 const ARANET_SERVICES = ['0000fce0-0000-1000-8000-00805f9b34fb', 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
 const ARANET_READINGS = 'f0cd3001-95da-4f4b-9ac8-aa55d312af0c';
 const VERNIER_SERVICE = 'd91714ef-28b9-4f91-ba16-f0d9a604f112';
@@ -250,13 +272,20 @@ let staleSilenced = false, staleBeepAt = 0;
 let settings = {limit:23.5, refP:1.0, recording:true, sessionStart:null};
 
 try { log = JSON.parse(localStorage.getItem(STORE) || '[]'); } catch(e) { log = []; }
+let events = [];          // O2 supply changes: {t, on:true|false, s:sessionStart}
+try { events = JSON.parse(localStorage.getItem(EVENTS) || '[]'); } catch(e) { events = []; }
+const saveEvents = () => { try { localStorage.setItem(EVENTS, JSON.stringify(events)); } catch(e) {} };
+// O2 supply state at time t: the last mark at or before t (null = never marked).
+function supplyAt(t){ let st = null; for (const e of events) { if (e.t <= t) st = e.on; else break; } return st; }
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS) || '{}')); } catch(e) {}
 if (settings.recording && !settings.sessionStart) settings.sessionStart = Date.now();
 $('limit').value = settings.limit; $('refP').value = settings.refP.toFixed(3);
 
 const save = () => { try { localStorage.setItem(STORE, JSON.stringify(log)); } catch(e) {} };
 const saveSettings = () => { try { localStorage.setItem(SETTINGS, JSON.stringify(settings)); } catch(e) {} };
-const msg = t => { $('msg').textContent = t || ''; };
+let msgFor = null;        // 'Vernier' | 'Aranet4' when the banner is a connection error
+const msg = (t, who) => { $('msg').textContent = t || ''; msgFor = t ? (who || null) : null; };
+function clearMsgIfAbout(who){ if (msgFor === who) msg(''); }
 function dlog(text, bad){
   const li = document.createElement('li');
   li.textContent = new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'}) + '  ' + text;
@@ -316,7 +345,11 @@ function beep(){
 async function keepAwake(){
   try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch(e) {}
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (vDevice || aranet)) keepAwake(); });
+document.addEventListener('visibilitychange', () => {
+  if (!(vBt || aranet)) return;
+  if (document.visibilityState === 'visible') { dlog('Page back in front'); keepAwake(); }
+  else dlog('Page went to the background — iOS will pause monitoring', true);
+});
 
 // ---------- alarm ----------
 function checkAlarm(actual){
@@ -381,6 +414,7 @@ function makeVernierAdapter(bt){
       await rsp.startNotifications();
       dlog('Vernier: notifications on');
     },
+    async renotify(){ if (this.deviceResponse) { try { await this.deviceResponse.stopNotifications(); } catch(_) {} await this.deviceResponse.startNotifications(); } },
     writeCommand(buf){ return this.deviceCommand.writeValue(buf); },
     async close(){ return bt.gatt.disconnect(); }
   };
@@ -398,7 +432,7 @@ function explain(e, who){
   if (n === 'NotFoundError') return `${who}: nothing selected. If the sensor wasn't in the list, check it's switched on and not connected to another app, or tick "Show all nearby devices" and look for it there.`;
   if (n === 'SecurityError' || n === 'NotAllowedError') return `${who}: Bluetooth permission was refused. Open iPhone Settings › Bluefy and turn Bluetooth on, then reload this page.`;
   if (n === 'NetworkError') return `${who}: the sensor didn't accept the connection. It may still be connected to another app; close that app, or turn the sensor off and on, and try again.`;
-  if (!e || !e.message) return `${who}: connection error (code ${m}). The app keeps retrying on its own; tap Reconnect only if it stays disconnected.`;
+  if (!e || !e.message) return `${who}: Bluetooth link lost (iOS code ${m}). The app reconnects on its own; this message clears when readings come back.`;
   return `${who}: ${m}`;
 }
 // Vernier: connect once through the chooser, then keep it alive automatically.
@@ -407,7 +441,9 @@ const V_STALE_MS = 15000;
 function vernierAge(){ return vLastAt ? Date.now() - vLastAt : Infinity; }
 function vernierFresh(){ return !!vDevice && (vernierAge() <= V_STALE_MS || (!vLastAt && Date.now() - vConnectedAt < V_STALE_MS)); }
 async function setupVernier(bt){
-  const dev = await godirect.createDevice(makeVernierAdapter(bt), { open:false });
+  const adapter = makeVernierAdapter(bt);
+  const dev = await godirect.createDevice(adapter, { open:false });
+  dev._o2adapter = adapter;
   await withTimeout(dev.open(false), 20000, 'Go Direct open');
   dev.keepValues = false;
   const s = pickO2Sensor(dev);
@@ -417,11 +453,11 @@ async function setupVernier(bt){
   s.on('value-changed', sensor => { if (vDevice === dev) onVernierValue(sensor.value); });
   dev.on('device-closed', () => {
     if (vDevice !== dev) return;
-    dlog('Vernier: connection dropped, reconnecting', true);
+    dlog('Vernier: link closed, reconnecting');
     vDevice = null; vReconnectAt = Date.now() + 2000;
   });
   dev.start(1000);
-  vDevice = dev; vConnectedAt = Date.now();
+  vDevice = dev; vConnectedAt = Date.now(); vRestarts = 0;
   $('vName').textContent = dev.name || 'Vernier O₂';
   $('vBtn').textContent = 'Reconnect';
   return s;
@@ -447,7 +483,7 @@ async function connectVernier(){
     $('vDot').className = vDevice ? 'dot on' : 'dot';
     $('vDetail').textContent = vDevice ? $('vDetail').textContent : 'Not connected';
     if (bt && !vDevice) { try { bt.gatt.disconnect(); dlog('Vernier: released the sensor after the failed attempt'); } catch(_) {} }
-    msg(explain(e, 'Vernier'));
+    msg(explain(e, 'Vernier'), 'Vernier');
   }
 }
 async function dropVernier(){
@@ -455,33 +491,42 @@ async function dropVernier(){
   if (old) { try { await withTimeout(old.close(), 3000, 'close'); } catch(_) {} }
   try { vBt && vBt.gatt.disconnect(); } catch(_) {}
 }
-// Watchdog: if no O2 values arrive, first restart measurements, then reconnect from scratch.
+// Watchdog. The Vernier sends a value every second. When values stop but the Bluetooth link
+// is still up (the usual case on iPhone), re-arm notifications and restart measurements;
+// that takes about a second. Tear the link down and reconnect only if that fails twice or
+// the link has actually closed.
+const V_NUDGE_MS = 6000;
+let vRestarts = 0;
 setInterval(async () => {
   if (!vBt || vBusy) return;
   const now = Date.now(), age = vernierAge();
-  if (vDevice && (age <= V_STALE_MS || now - vConnectedAt < V_STALE_MS)) return;
+  const sinceConnect = now - vConnectedAt;
+  if (vDevice && (age <= V_NUDGE_MS || (!vLastAt && sinceConnect < V_STALE_MS))) return;
   vBusy = true;
   try {
-    if (vDevice && now - vConnectedAt < 30000 && now > vRestartAt) {
-      vRestartAt = now + 20000;
-      dlog(`Vernier: no readings for ${Math.round(age/1000)} s, restarting measurements`, true);
+    const linkUp = !!(vBt.gatt && vBt.gatt.connected);
+    if (vDevice && linkUp && vRestarts < 2 && now > vRestartAt) {
+      vRestartAt = now + 6000; vRestarts++;
+      dlog(`Vernier: no readings for ${Math.round(age/1000)} s, link still up — restarting stream (${vRestarts}/2)`);
+      vDevice.remainingResponseLegnth = 0; vDevice.response = null;   // clear any half-received packet
+      try { await withTimeout(vDevice._o2adapter.renotify(), 4000, 'Re-arm notifications'); } catch(_) {}
       try { vDevice.stop(); } catch(_) {}
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 400));
       try { vDevice.start(1000); } catch(_) {}
-    } else if ((!vDevice || now - vConnectedAt >= 30000) && now > vReconnectAt) {
-      vReconnectAt = now + 20000;
+    } else if ((!vDevice || !linkUp || vRestarts >= 2) && now > vRestartAt && now > vReconnectAt) {
       vFails++;
-      if (vFails === 1 || vFails % 5 === 0) dlog(`Vernier: reconnecting (attempt ${vFails})`, true);
+      vReconnectAt = now + Math.min(30000, 3000 * vFails);    // back off: 3 s, 6 s, 9 s … 30 s
+      dlog(`Vernier: reconnecting (attempt ${vFails}${linkUp ? ', stream would not restart' : ', link closed'})`, vFails >= 3);
       await dropVernier();
       await new Promise(r => setTimeout(r, 1000));
       const sn = await setupVernier(vBt);
       dlog(`Vernier: reconnected, measuring ${sn.name}`);
     }
   } catch(e) {
-    if (vFails === 1 || vFails % 5 === 0) dlog(`Vernier: reconnect failed (${e.message || e}), will keep trying`, true);
+    dlog(`Vernier: reconnect failed (${e.message || e}), will keep trying`, vFails >= 3);
     vDevice = null;
   } finally { vBusy = false; }
-}, 5000);
+}, 2000);
 function updateVernierStatus(){
   if (!vBt) return;
   const age = vernierAge();
@@ -491,7 +536,8 @@ function updateVernierStatus(){
 }
 function onVernierValue(v){
   if (typeof v !== 'number' || !isFinite(v)) return;
-  if (vFails) { dlog('Vernier: readings back'); vFails = 0; }
+  if (vFails || vRestarts) { dlog('Vernier: readings back'); vFails = 0; vRestarts = 0; }
+  clearMsgIfAbout('Vernier');
   vLast = v; vLastAt = Date.now(); vSamples.push(v);
   const recent = vSamples.slice(-10);
   const avg = recent.reduce((a,b)=>a+b,0) / recent.length;
@@ -503,13 +549,15 @@ function onVernierValue(v){
 // Pressure counts as fresh only if the Aranet4 measured it recently. Stale pressure is never
 // used to compute actual O2, so a dropped connection can't cause false highs or lows.
 const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(what + ' timed out')), ms))]);
-// Fresh = we heard from the Aranet4 in the last 40 s (it is polled every 15 s) AND its
-// measurement is no older than one measurement interval plus 30 s.
-const CONTACT_LIMIT_MS = 40000;
+// Fresh = we heard from the Aranet4, and its measurement is no older than one measurement
+// interval plus 30 s.
+// Reads are timed to the sensor's own measurement interval, so contact is expected about once
+// per interval; allow the same margin as for the measurement itself.
+function contactLimitMs(){ return staleLimitMs(); }
 function staleLimitMs(){ return ((aranet && aranet.interval) ? aranet.interval * 1000 : 60000) + 30000; }
 function pressureAge(){ return aranet && aranet.measuredAt ? Date.now() - aranet.measuredAt : Infinity; }
 function contactAge(){ return aranet && aranet.lastContact ? Date.now() - aranet.lastContact : Infinity; }
-function pressureFresh(){ return !!(aranet && aranet.kpa && contactAge() <= CONTACT_LIMIT_MS && pressureAge() <= staleLimitMs()); }
+function pressureFresh(){ return !!(aranet && aranet.kpa && contactAge() <= contactLimitMs() && pressureAge() <= staleLimitMs()); }
 
 async function getAranetChar(server){
   for (const svc of ARANET_SERVICES){
@@ -523,15 +571,20 @@ async function getAranetChar(server){
 async function aranetConnect(){
   const server = await withTimeout(aranet.device.gatt.connect(), 15000, 'Connect');
   aranet.char = await withTimeout(getAranetChar(server), 10000, 'Service lookup');
-  dlog('Aranet4: connected');
+  if (!aranet.drops) dlog('Aranet4: connected');
 }
 function applyAranet(d, source){
   const now = Date.now();
   const measuredAt = now - (d.ago != null ? d.ago * 1000 : 0);
   if (aranet.measuredAt && measuredAt < aranet.measuredAt - 5000) return; // older than what we have
   if (d.hPa != null) aranet.kpa = d.hPa / 10;
-  if (aranet.fails) dlog(`Aranet4: readings back after ${aranet.fails} failed attempt${aranet.fails === 1 ? '' : 's'}`);
+  if (aranet.fails >= 2) dlog(`Aranet4: readings back after ${aranet.fails} failed attempts`);
+  const isNew = !aranet.measuredAt || measuredAt > aranet.measuredAt + 5000;
   Object.assign(aranet, { tempC:d.tempC, rh:d.rh, co2:d.co2, interval:d.interval || aranet.interval, measuredAt, lastContact: now, source, everOk:true, fails:0 });
+  // Next read: shortly after the sensor's next measurement; if this one wasn't new, look again in 10 s.
+  const iv = (aranet.interval || 60) * 1000;
+  aranet.nextReadAt = isNew ? Math.max(now + 5000, measuredAt + iv + 4000) : now + 10000;
+  clearMsgIfAbout('Aranet4');
   if (d.co2 != null) { $('co2').innerHTML = `${d.co2} <small>ppm</small>`; $('gCO2').innerHTML = `${d.co2}<small>ppm</small>`; }
   updateAranetStatus();
 }
@@ -554,21 +607,23 @@ async function pollAranet(){
   try {
     for (let attempt = 1; attempt <= 2; attempt++){
       try {
-        if (!aranet.char || !aranet.device.gatt.connected){ aranet.reconnecting = true; updateAranetStatus(); await aranetConnect(); }
+        if (!aranet.char || !aranet.device.gatt.connected){ aranet.reconnecting = true; updateAranetStatus(); await aranetConnect(); aranet.reconnecting = false; }
         const dv = await withTimeout(aranet.char.readValue(), 8000, 'Read');
         aranet.reconnecting = false;
         applyAranet(decodeAranet(dv), 'connection');
         return;
       } catch(e) {
         aranet.fails = (aranet.fails || 0) + 1;
-        if (aranet.fails === 1 || aranet.fails % 10 === 0) dlog(`Aranet4: ${e.name && e.name !== 'Error' ? e.name + ': ' : ''}${e.message || e} (failure ${aranet.fails}, still retrying)`, true);
+        // One failure right after a drop is normal (the read was in flight); only flag repeats.
+        if (aranet.fails === 2 || aranet.fails % 10 === 0) dlog(`Aranet4: ${e.name && e.name !== 'Error' ? e.name + ': ' : ''}${e.message || e} (failure ${aranet.fails}, still retrying)`, true);
         // Drop the connection completely and start fresh; a half-open link otherwise fails forever.
-        aranet.char = null;
+        aranet.char = null; aranet.selfClose = true;
         try { aranet.device.gatt.disconnect(); } catch(_) {}
         aranet.reconnecting = true;
         await new Promise(r => setTimeout(r, 1500));
       }
     }
+    aranet.nextReadAt = Date.now() + Math.min(30000, 5000 * aranet.fails);   // both tries failed: back off
   } finally { aranetBusy = false; updateAranetStatus(); }
 }
 // Backup: Aranet4 broadcasts its readings when "Smart Home integrations" is on in Aranet Home.
@@ -601,14 +656,20 @@ async function connectAranet(){
     $('aDot').className = 'dot wait'; $('aDetail').textContent = 'Choose your Aranet4 in the list…';
     const device = await chooser('Aranet', ARANET_SERVICES);
     dlog(`Aranet4: picked "${device.name || 'unnamed'}"`);
+    for (let i = 0; i < 40 && aranetBusy; i++) await new Promise(r => setTimeout(r, 250));   // let a background reconnect finish
     if (aranet && aranet.device !== device) { try { aranet.device.gatt.disconnect(); } catch(_) {} }
+    if (aranet && aranet.device === device && aranet.char && device.gatt.connected) { aranet.nextReadAt = 0; await pollAranet(); $('aBtn').textContent = 'Reconnect'; return; }
     aranet = { device, char:null, fails:0 };
     $('aDetail').textContent = 'Connecting… (iOS may ask for the PIN shown on the Aranet4 screen)';
     device.addEventListener('gattserverdisconnected', () => {
       if (!aranet || aranet.device !== device) return;
-      dlog('Aranet4: connection dropped, reconnecting');
-      aranet.char = null; aranet.reconnecting = true; updateAranetStatus();
-      setTimeout(pollAranet, 2000);
+      aranet.char = null;
+      if (aranet.selfClose) { aranet.selfClose = false; return; }   // we closed it ourselves
+      aranet.drops = (aranet.drops || 0) + 1;
+      // The Aranet4 closes idle links on its own. Nothing is lost: we reconnect at the next
+      // scheduled read, which is when the next measurement is ready anyway.
+      dlog(`Aranet4: link closed by sensor (${aranet.drops} so far) — reconnects at next read`);
+      updateAranetStatus();
     });
     await aranetConnect();
     $('aName').textContent = device.name || 'Aranet4';
@@ -619,10 +680,10 @@ async function connectAranet(){
   } catch(e) {
     $('aDot').className = aranet && aranet.everOk ? 'dot wait' : 'dot';
     if (!(aranet && aranet.everOk)) $('aDetail').textContent = 'Not connected';
-    msg(explain(e, 'Aranet4'));
+    msg(explain(e, 'Aranet4'), 'Aranet4');
   }
 }
-setInterval(() => { if (aranet) pollAranet(); }, 15000);
+setInterval(() => { if (aranet && Date.now() >= (aranet.nextReadAt || 0)) pollAranet(); }, 2000);
 
 // ---------- stale-pressure warning ----------
 function lowBeep(){
@@ -656,8 +717,20 @@ $('staleAck').addEventListener('click', () => { staleSilenced = true; });
 
 // ---------- minute logger ----------
 let nextTick = Math.ceil(Date.now() / 60000) * 60000;
+// iOS freezes the page when the screen locks or dims, or when another app is in front. While
+// frozen nothing runs: no readings, no logging, no alarm. Detect it so the log says so plainly,
+// and recover both sensors straight away when the page wakes up.
+let lastTickAt = Date.now(), pauseCount = 0;
 async function tick(){
   const now = Date.now();
+  const gap = now - lastTickAt; lastTickAt = now;
+  if (gap > 5000 && (vBt || aranet)) {
+    pauseCount++;
+    const sec = Math.round(gap / 1000);
+    dlog(`App was PAUSED by iOS for ${sec < 120 ? sec + ' s' : Math.round(sec / 60) + ' min'} (screen lock/dim or app switch; pause #${pauseCount}) — no readings or alarm during that time`, true);
+    if (aranet) aranet.nextReadAt = 0;      // read pressure now
+    vRestartAt = 0; vReconnectAt = 0;       // let the Vernier watchdog act now
+  }
   const secs = Math.max(0, Math.round((nextTick - now)/1000));
   $('countdown').textContent = !settings.recording ? 'Stopped' : (vDevice || aranet || DEMO) ? `${secs} s` : '—';
   updateAranetStatus(); updateVernierStatus(); updateStale();
@@ -759,6 +832,36 @@ function draw(){
   const cS = niceTicks(Math.max(0, cMin - 50), cMax + 50, 4);
   const yC = v => top3 + h3 - (v - cS.lo) / (cS.hi - cS.lo) * h3;
 
+  // O2-supply-off periods: shaded band across all three graphs, with a line and label at each mark
+  if (events.length){
+    const wc = css('--warn');
+    ctx.save(); ctx.beginPath(); ctx.rect(L, 0, pw, H - 22); ctx.clip();
+    ctx.fillStyle = wc; ctx.globalAlpha = .16;
+    events.forEach((e, i) => {
+      if (e.on) return;
+      const a = e.t, b = i + 1 < events.length ? events[i + 1].t : Date.now();
+      if (b < t0 || a > t1) return;
+      ctx.fillRect(xOf(a), top1, xOf(b) - xOf(a), top3 + h3 - top1);
+    });
+    ctx.globalAlpha = 1; ctx.lineWidth = 1.5; ctx.textBaseline = 'top'; ctx.font = '600 10px ' + css('--display');
+    const laneEnd = [-Infinity, -Infinity, -Infinity];   // labels stack in up to 3 rows so they never overlap
+    events.forEach(e => {
+      if (e.t < t0 || e.t > t1) return;
+      const x = Math.round(xOf(e.t)) + .5;
+      ctx.strokeStyle = e.on ? css('--ok') : wc;
+      ctx.beginPath(); ctx.moveTo(x, top1); ctx.lineTo(x, top3 + h3); ctx.stroke();
+      const lab = e.on ? 'O₂ on' : 'O₂ off', w = ctx.measureText(lab).width;
+      const lx = Math.min(x + 3, L + pw - w - 2);
+      const lane = laneEnd.findIndex(end => lx > end + 4);
+      if (lane < 0) return;                                 // too crowded: line only (zoom in to see labels)
+      laneEnd[lane] = lx + w;
+      const ly = top1 + h1 - 13 - lane * 14;
+      ctx.fillStyle = css('--panel'); ctx.fillRect(lx - 1, ly - 1, w + 2, 13);
+      ctx.fillStyle = e.on ? css('--ok') : wc; ctx.fillText(lab, lx, ly);
+    });
+    ctx.restore(); ctx.font = '11px ' + css('--display'); ctx.lineWidth = 1;
+  }
+
   // grid + y labels
   ctx.strokeStyle = line; ctx.fillStyle = ink; ctx.lineWidth = 1; ctx.textBaseline = 'middle'; ctx.textAlign = 'right';
   const grid = (S, yf, fmt) => S.ticks.forEach(v => { const y = Math.round(yf(v)) + .5; ctx.beginPath(); ctx.moveTo(L,y); ctx.lineTo(L+pw,y); ctx.stroke(); ctx.fillText(fmt(v), L-6, y); });
@@ -850,17 +953,61 @@ $('range').addEventListener('click', e => {
   if (viewEnd != null) setViewEnd(viewEnd); else draw();
 });
 
+// ---------- O2 supply marks ----------
+const fmtClock = t => new Date(t).toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
+const fmtDur = ms => { const m = Math.floor(ms / 60000), h = Math.floor(m / 60); return h ? `${h} h ${m % 60} min` : m ? `${m} min` : `${Math.floor(ms / 1000)} s`; };
+let undoTimer = null;
+function markSupply(on){
+  const cur = events.length ? events[events.length - 1].on : null;
+  if (cur === on) return;                       // already in that state
+  const ev = { t: Date.now(), on, s: settings.recording ? settings.sessionStart : null };
+  events.push(ev); saveEvents();
+  dlog(`O₂ supply marked ${on ? 'ON' : 'OFF'}`);
+  $('supUndo').hidden = false; clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => { $('supUndo').hidden = true; }, 30000);
+  updateSupplyUI(); draw();
+}
+function updateSupplyUI(){
+  const last = events[events.length - 1];
+  $('supOn').setAttribute('aria-pressed', !!(last && last.on));
+  $('supOff').setAttribute('aria-pressed', !!(last && !last.on));
+  $('supState').textContent = last ? `${last.on ? 'ON' : 'OFF'} since ${fmtTime(last.t)} · ${fmtDur(Date.now() - last.t)}` : 'Not marked yet';
+  const recent = events.slice(-20).reverse();
+  $('supHist').innerHTML = '';
+  recent.forEach((e, i) => {
+    const li = document.createElement('li');
+    const next = recent[i - 1];
+    li.textContent = `${fmtClock(e.t)}  O₂ ${e.on ? 'ON ' : 'OFF'}` + (next ? `  (${fmtDur(next.t - e.t)})` : '');
+    $('supHist').appendChild(li);
+  });
+}
+$('supOn').addEventListener('click', () => markSupply(true));
+$('supOff').addEventListener('click', () => markSupply(false));
+$('supUndo').addEventListener('click', () => {
+  const ev = events.pop(); saveEvents(); $('supUndo').hidden = true;
+  if (ev) dlog(`O₂ supply mark (${ev.on ? 'ON' : 'OFF'} at ${fmtClock(ev.t)}) undone`);
+  updateSupplyUI(); draw();
+});
+setInterval(() => { if (events.length) updateSupplyUI(); }, 15000);
+
 // ---------- CSV ----------
-function csv(rows = log){
-  const head = 'timestamp_iso,local_time,vernier_raw_o2_pct,pressure_kpa,pressure_atm,o2_partial_pressure_atm,o2_partial_pressure_kpa,actual_o2_pct,aranet_temp_c,aranet_rh_pct,co2_ppm,pressure_age_s,session_start';
+function csv(rows = log, evRange = null){
+  const head = 'timestamp_iso,local_time,vernier_raw_o2_pct,pressure_kpa,pressure_atm,o2_partial_pressure_atm,o2_partial_pressure_kpa,actual_o2_pct,aranet_temp_c,aranet_rh_pct,co2_ppm,pressure_age_s,session_start,o2_supply,event';
+  const sup = t => { const v = supplyAt(t); return v == null ? '' : v ? 'on' : 'off'; };
   const lines = rows.map(r => [
     new Date(r.t).toISOString(),
     '"' + new Date(r.t).toLocaleString() + '"',
     r.raw != null ? r.raw.toFixed(3) : '', r.kpa != null ? r.kpa.toFixed(2) : '', r.kpa != null ? (r.kpa/STD_ATM_KPA).toFixed(4) : '',
     r.po2Atm != null ? r.po2Atm.toFixed(4) : '', r.po2Atm != null ? (r.po2Atm*STD_ATM_KPA).toFixed(2) : '', r.actual != null ? r.actual.toFixed(2) : '',
-    r.tempC != null ? r.tempC.toFixed(1) : '', r.rh != null ? r.rh : '', r.co2 != null ? r.co2 : '', r.pAge != null ? r.pAge : '', r.s ? '"' + new Date(r.s).toLocaleString() + '"' : ''
-  ].join(','));
-  return [head, ...lines].join('\n') + '\n';
+    r.tempC != null ? r.tempC.toFixed(1) : '', r.rh != null ? r.rh : '', r.co2 != null ? r.co2 : '', r.pAge != null ? r.pAge : '', r.s ? '"' + new Date(r.s).toLocaleString() + '"' : '',
+    sup(r.t), ''
+  ].join(',')).map((line, i) => ({ t: rows[i].t, line }));
+  // Supply marks become their own rows, in time order, so none are lost between readings.
+  const t0 = rows.length ? rows[0].t : -Infinity, t1 = rows.length ? rows[rows.length - 1].t : Infinity;
+  const evs = (evRange ? events.filter(e => e.t >= evRange[0] && e.t <= evRange[1]) : events.filter(e => e.t >= t0 - 60e3 && e.t <= Math.max(t1, Date.now())))
+    .map(e => ({ t: e.t, line: [new Date(e.t).toISOString(), '"' + new Date(e.t).toLocaleString() + '"', '', '', '', '', '', '', '', '', '', '', e.s ? '"' + new Date(e.s).toLocaleString() + '"' : '', e.on ? 'on' : 'off', e.on ? 'O2 ON' : 'O2 OFF'].join(',') }));
+  const all = lines.concat(evs).sort((a, b) => a.t - b.t).map(x => x.line);
+  return [head, ...all].join('\n') + '\n';
 }
 function fname(prefix = 'o2-log', t = Date.now()){ const d = new Date(t); const p = n => String(n).padStart(2,'0'); return `${prefix}-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.csv`; }
 $('shareBtn').addEventListener('click', () => {
@@ -890,12 +1037,13 @@ function updateRecUI(){
 function exportSession(start){
   const rows = sessionRows(start);
   if (!rows.length) { msg('That session has no readings.'); return; }
-  shareCsv(csv(rows), fname('o2-session', start));
+  const end = (settings.recording && settings.sessionStart === start) ? Date.now() : (settings.lastSessionEnd || rows[rows.length - 1].t);
+  shareCsv(csv(rows, [start, end]), fname('o2-session', start));
 }
 $('recBtn').addEventListener('click', () => {
   if (settings.recording){
     const start = settings.sessionStart;
-    settings.recording = false; settings.lastSession = start; saveSettings(); updateRecUI();
+    settings.recording = false; settings.lastSession = start; settings.lastSessionEnd = Date.now(); saveSettings(); updateRecUI();
     const n = sessionRows(start).length;
     $('stamp').textContent = `Stopped · session saved (${n} reading${n === 1 ? '' : 's'})`;
     if (n) exportSession(start); else msg('Recording stopped. That session had no readings.');
@@ -915,7 +1063,7 @@ $('copyBtn').addEventListener('click', async () => {
 });
 let clearTimer;
 $('clearBtn').addEventListener('click', () => { $('clearConfirm').hidden = false; clearTimeout(clearTimer); clearTimer = setTimeout(() => $('clearConfirm').hidden = true, 4000); });
-$('clearConfirm').addEventListener('click', () => { log = []; save(); $('clearConfirm').hidden = true; $('logCount').textContent = '0 readings'; draw(); msg('Log cleared.'); });
+$('clearConfirm').addEventListener('click', () => { log = []; save(); events = []; saveEvents(); updateSupplyUI(); $('clearConfirm').hidden = true; $('logCount').textContent = '0 readings'; draw(); msg('Log cleared.'); });
 
 // ---------- settings ----------
 $('limit').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0) { settings.limit = v; saveSettings(); draw(); } });
@@ -939,7 +1087,7 @@ if (/[?&]test\b/.test(location.search)) {
   window.__t = { setVBt: b => { vBt = b; }, onVernierValue, decodeAranetAdvert, setVDevice: v => { vDevice = v; }, get log(){ return log; } };
 }
 
-updateRecUI();
+updateRecUI(); updateSupplyUI();
 if (log.length) showRow(log[log.length-1]);
 if (!settings.recording) $('stamp').textContent = 'Stopped · tap Start session to record';
 $('logCount').textContent = `${log.length} reading${log.length===1?'':'s'}`;
