@@ -127,7 +127,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 <body>
 <main>
   <header>
-    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v13</span></h1>
+    <h1>ALTITUDE O₂ MONITOR <span style="color:var(--muted);font-weight:400">v14</span></h1>
     <p class="sub">Vernier Go Direct O₂ corrected by Aranet4 barometric pressure. Logs once per minute.</p>
   </header>
 
@@ -212,6 +212,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
       <span><i style="background:var(--co2)"></i>CO₂, ppm</span>
       <span><i style="background:var(--alarm)"></i>Alarm limit</span>
       <span><i style="background:var(--warn);height:10px;opacity:.35"></i>O₂ supply off</span>
+      <span><i style="background:var(--muted);height:10px;opacity:.4"></i>App paused by iOS</span>
     </div>
     <div class="pan">
       <button id="panBack" type="button" aria-label="Show earlier">‹ Earlier</button>
@@ -228,6 +229,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
       <button id="shareBtn" type="button">Export all</button>
       <button id="copyBtn" type="button">Copy CSV</button>
       <button id="sessBtn" type="button" hidden>Export last session</button>
+      <button id="diagBtn" type="button">Export connection log</button>
       <button id="clearBtn" type="button">Clear log</button>
       <button id="clearConfirm" type="button" hidden style="color:var(--alarm)">Tap again to erase</button>
     </div>
@@ -252,7 +254,7 @@ textarea{width:100%;min-height:120px;font:.75rem var(--display);background:var(-
 const $ = id => document.getElementById(id);
 const STD_ATM_KPA = 101.325;
 const STORE = 'o2mon.log.v1', SETTINGS = 'o2mon.settings.v1', EVENTS = 'o2mon.events.v1';
-const APP_VERSION = '13';
+const APP_VERSION = '14';
 const ARANET_SERVICES = ['0000fce0-0000-1000-8000-00805f9b34fb', 'f0cd1400-95da-4f4b-9ac8-aa55d312af0c'];
 const ARANET_READINGS = 'f0cd3001-95da-4f4b-9ac8-aa55d312af0c';
 const VERNIER_SERVICE = 'd91714ef-28b9-4f91-ba16-f0d9a604f112';
@@ -272,6 +274,9 @@ let staleSilenced = false, staleBeepAt = 0;
 let settings = {limit:23.5, refP:1.0, recording:true, sessionStart:null};
 
 try { log = JSON.parse(localStorage.getItem(STORE) || '[]'); } catch(e) { log = []; }
+let pauses = [];          // spans when iOS froze the page: {a, b}
+try { pauses = JSON.parse(localStorage.getItem('o2mon.pauses.v1') || '[]'); } catch(e) { pauses = []; }
+const savePauses = () => { try { localStorage.setItem('o2mon.pauses.v1', JSON.stringify(pauses.slice(-2000))); } catch(e) {} };
 let events = [];          // O2 supply changes: {t, on:true|false, s:sessionStart}
 try { events = JSON.parse(localStorage.getItem(EVENTS) || '[]'); } catch(e) { events = []; }
 const saveEvents = () => { try { localStorage.setItem(EVENTS, JSON.stringify(events)); } catch(e) {} };
@@ -292,6 +297,11 @@ function dlog(text, bad){
   if (bad) li.className = 'bad';
   $('diagList').appendChild(li);
   while ($('diagList').children.length > 60) $('diagList').firstChild.remove();
+  try {
+    const keep = JSON.parse(localStorage.getItem('o2mon.diag.v1') || '[]');
+    keep.push(new Date().toLocaleString() + (bad ? '  !! ' : '  ') + text);
+    localStorage.setItem('o2mon.diag.v1', JSON.stringify(keep.slice(-1500)));
+  } catch(_) {}
 }
 (async () => {
   dlog(`App version ${APP_VERSION}`);
@@ -323,6 +333,7 @@ function decodeAranet(dv){
 
 // ---------- audio / wake ----------
 function unlockAudio(){
+  if (!wakeLock) startVideoAwake();
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -342,9 +353,39 @@ function beep(){
     });
   } catch(e) {}
 }
-async function keepAwake(){
-  try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch(e) {}
+// Keep the screen on. Bluefy may not offer the Wake Lock API, and then iOS Auto-Lock turns
+// the screen off and freezes the page. Fallback: a tiny silent video playing on a loop,
+// which iOS treats as "media playing" and does not auto-lock over.
+let noSleepVid = null, awakeHow = '';
+function startVideoAwake(){
+  try {
+    if (!noSleepVid) {
+      noSleepVid = document.createElement('video');
+      noSleepVid.setAttribute('playsinline', ''); noSleepVid.setAttribute('muted', ''); noSleepVid.muted = true;
+      noSleepVid.loop = true; noSleepVid.src = 'data:video/mp4;base64,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YV9tZT0xIHRyZWxsaXM9MCA4eDhkY3Q9MCBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21hX3FwX29mZnNldD0wIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0yNTAga2V5aW50X21pbj0xIHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByY19sb29rYWhlYWQ9MTAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4wMACAAAAADmWIhAW///8PRQABT3+AARggBwEYIAcBGCAHARggBwEYIAcBGCAHARggBwEYIAcAAAAFQZogFfUBGCAHARggBwEYIAcBGCAHARggBwEYIAcBGCAHARggBw==';
+      noSleepVid.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;left:0;bottom:0;pointer-events:none';
+      document.body.appendChild(noSleepVid);
+    }
+    const p = noSleepVid.play();
+    if (p && p.then) p.then(() => { if (awakeHow !== 'video') { awakeHow = 'video'; dlog('Screen kept on (video method)'); } })
+                      .catch(e => dlog(`Could not keep screen on (${e.name || e}) — set Auto-Lock to Never`, true));
+  } catch(e) {}
 }
+async function keepAwake(){
+  if (wakeLock) return;
+  if ('wakeLock' in navigator) {
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+      if (awakeHow !== 'lock') { awakeHow = 'lock'; dlog('Screen kept on (wake lock)'); }
+      return;
+    } catch(e) { if (awakeHow !== 'video') dlog(`Wake lock refused (${e.name || e}), using video method`); }
+  } else if (!awakeHow) dlog('This browser has no wake lock, using video method');
+  startVideoAwake();
+}
+// iOS only lets media start from a tap, so try on every tap until something works.
+document.addEventListener('touchend', () => { if ((vBt || aranet) && !wakeLock && !(noSleepVid && !noSleepVid.paused)) { startVideoAwake(); keepAwake(); } }, {passive:true});
+document.addEventListener('click', () => { if ((vBt || aranet) && !wakeLock && !(noSleepVid && !noSleepVid.paused)) { startVideoAwake(); keepAwake(); } });
 document.addEventListener('visibilitychange', () => {
   if (!(vBt || aranet)) return;
   if (document.visibilityState === 'visible') { dlog('Page back in front'); keepAwake(); }
@@ -728,6 +769,7 @@ async function tick(){
     pauseCount++;
     const sec = Math.round(gap / 1000);
     dlog(`App was PAUSED by iOS for ${sec < 120 ? sec + ' s' : Math.round(sec / 60) + ' min'} (screen lock/dim or app switch; pause #${pauseCount}) — no readings or alarm during that time`, true);
+    pauses.push({ a: now - gap, b: now }); savePauses();
     if (aranet) aranet.nextReadAt = 0;      // read pressure now
     vRestartAt = 0; vReconnectAt = 0;       // let the Vernier watchdog act now
   }
@@ -742,14 +784,20 @@ async function tick(){
   vSamples = [];
   const haveO2 = fresh.length > 0, ok = pressureFresh();
   if (!haveO2 && !ok) {
-    if (vBt || aranet) $('stamp').textContent = 'Not logging: no fresh readings from either sensor';
+    if (vBt || aranet) {
+      $('stamp').textContent = 'Not logging: no fresh readings from either sensor';
+      const why = `no fresh readings: Vernier ${isFinite(vernierAge()) ? Math.round(vernierAge()/1000) + ' s' : 'none'}, Aranet4 ${isFinite(pressureAge()) ? Math.round(pressureAge()/1000) + ' s' : 'none'}`;
+      log.push({ t: now, raw:null, kpa:null, actual:null, po2Atm:null, s: settings.sessionStart, note: why }); save();
+    }
     if (viewEnd == null) draw();
     return;
   }
   const raw = haveO2 ? fresh.reduce((a,b)=>a+b,0) / fresh.length : null;
   const c = haveO2 && ok ? compute(raw, aranet.kpa) : { actual:null, po2Atm: haveO2 ? raw / 100 * settings.refP : null };
   const age = pressureAge();
-  const row = { t: now, raw, kpa: ok ? aranet.kpa : null, actual: c.actual, po2Atm: c.po2Atm,
+  const why = !haveO2 ? `no O2: Vernier ${isFinite(vernierAge()) ? Math.round(vernierAge()/1000) + ' s' : 'none'} since last value`
+            : !ok ? `no pressure: Aranet4 reading ${isFinite(pressureAge()) ? Math.round(pressureAge()/1000) + ' s' : 'none'} old` : undefined;
+  const row = { t: now, note: why, raw, kpa: ok ? aranet.kpa : null, actual: c.actual, po2Atm: c.po2Atm,
     tempC: ok ? aranet.tempC : null, rh: ok ? aranet.rh : null, co2: ok ? (aranet.co2 ?? null) : null,
     pAge: isFinite(age) ? Math.round(age / 1000) : null, s: settings.sessionStart };
   log.push(row); save();
@@ -832,6 +880,13 @@ function draw(){
   const cS = niceTicks(Math.max(0, cMin - 50), cMax + 50, 4);
   const yC = v => top3 + h3 - (v - cS.lo) / (cS.hi - cS.lo) * h3;
 
+  // spans when iOS froze the page: grey hatched band, so gaps explain themselves
+  if (pauses.length){
+    ctx.save(); ctx.beginPath(); ctx.rect(L, 0, pw, H - 22); ctx.clip();
+    ctx.fillStyle = ink; ctx.globalAlpha = .14;
+    pauses.forEach(z => { if (z.b < t0 || z.a > t1) return; ctx.fillRect(xOf(z.a), top1, Math.max(1.5, xOf(z.b) - xOf(z.a)), top3 + h3 - top1); });
+    ctx.restore();
+  }
   // O2-supply-off periods: shaded band across all three graphs, with a line and label at each mark
   if (events.length){
     const wc = css('--warn');
@@ -992,7 +1047,7 @@ setInterval(() => { if (events.length) updateSupplyUI(); }, 15000);
 
 // ---------- CSV ----------
 function csv(rows = log, evRange = null){
-  const head = 'timestamp_iso,local_time,vernier_raw_o2_pct,pressure_kpa,pressure_atm,o2_partial_pressure_atm,o2_partial_pressure_kpa,actual_o2_pct,aranet_temp_c,aranet_rh_pct,co2_ppm,pressure_age_s,session_start,o2_supply,event';
+  const head = 'timestamp_iso,local_time,vernier_raw_o2_pct,pressure_kpa,pressure_atm,o2_partial_pressure_atm,o2_partial_pressure_kpa,actual_o2_pct,aranet_temp_c,aranet_rh_pct,co2_ppm,pressure_age_s,session_start,o2_supply,event,note';
   const sup = t => { const v = supplyAt(t); return v == null ? '' : v ? 'on' : 'off'; };
   const lines = rows.map(r => [
     new Date(r.t).toISOString(),
@@ -1000,12 +1055,16 @@ function csv(rows = log, evRange = null){
     r.raw != null ? r.raw.toFixed(3) : '', r.kpa != null ? r.kpa.toFixed(2) : '', r.kpa != null ? (r.kpa/STD_ATM_KPA).toFixed(4) : '',
     r.po2Atm != null ? r.po2Atm.toFixed(4) : '', r.po2Atm != null ? (r.po2Atm*STD_ATM_KPA).toFixed(2) : '', r.actual != null ? r.actual.toFixed(2) : '',
     r.tempC != null ? r.tempC.toFixed(1) : '', r.rh != null ? r.rh : '', r.co2 != null ? r.co2 : '', r.pAge != null ? r.pAge : '', r.s ? '"' + new Date(r.s).toLocaleString() + '"' : '',
-    sup(r.t), ''
+    sup(r.t), '', r.note ? '"' + r.note + '"' : ''
   ].join(',')).map((line, i) => ({ t: rows[i].t, line }));
   // Supply marks become their own rows, in time order, so none are lost between readings.
   const t0 = rows.length ? rows[0].t : -Infinity, t1 = rows.length ? rows[rows.length - 1].t : Infinity;
   const evs = (evRange ? events.filter(e => e.t >= evRange[0] && e.t <= evRange[1]) : events.filter(e => e.t >= t0 - 60e3 && e.t <= Math.max(t1, Date.now())))
-    .map(e => ({ t: e.t, line: [new Date(e.t).toISOString(), '"' + new Date(e.t).toLocaleString() + '"', '', '', '', '', '', '', '', '', '', '', e.s ? '"' + new Date(e.s).toLocaleString() + '"' : '', e.on ? 'on' : 'off', e.on ? 'O2 ON' : 'O2 OFF'].join(',') }));
+    .map(e => ({ t: e.t, line: [new Date(e.t).toISOString(), '"' + new Date(e.t).toLocaleString() + '"', '', '', '', '', '', '', '', '', '', '', e.s ? '"' + new Date(e.s).toLocaleString() + '"' : '', e.on ? 'on' : 'off', e.on ? 'O2 ON' : 'O2 OFF', ''].join(',') }));
+  const lo = evRange ? evRange[0] : t0 - 60e3, hi = evRange ? evRange[1] : Math.max(t1, Date.now());
+  const pz = pauses.filter(z => z.b >= lo && z.a <= hi).map(z => ({ t: z.a, line: [new Date(z.a).toISOString(), '"' + new Date(z.a).toLocaleString() + '"', '', '', '', '', '', '', '', '', '', '', '', sup(z.a), 'APP PAUSED',
+    `"iOS paused the page for ${Math.round((z.b - z.a) / 1000)} s, until ${new Date(z.b).toLocaleTimeString()} (screen lock or app switch)"`].join(',') }));
+  evs.push(...pz);
   const all = lines.concat(evs).sort((a, b) => a.t - b.t).map(x => x.line);
   return [head, ...all].join('\n') + '\n';
 }
@@ -1061,9 +1120,18 @@ $('copyBtn').addEventListener('click', async () => {
   const text = csv();
   try { await navigator.clipboard.writeText(text); msg(`Copied ${log.length} rows to the clipboard.`); } catch(e) { showFallback(text); }
 });
+$('diagBtn').addEventListener('click', async () => {
+  let lines = []; try { lines = JSON.parse(localStorage.getItem('o2mon.diag.v1') || '[]'); } catch(_) {}
+  if (!lines.length) { msg('The connection log is empty.'); return; }
+  const text = `Altitude O2 Monitor v${APP_VERSION} connection log\n` + lines.join('\n') + '\n';
+  const name = fname('o2-connection-log').replace('.csv', '.txt');
+  const file = new File([text], name, {type:'text/plain'});
+  try { if (navigator.canShare && navigator.canShare({files:[file]})) { await navigator.share({files:[file], title:name}); return; } } catch(e) { if (e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(text); msg('Connection log copied to the clipboard.'); } catch(e) { showFallback(text); }
+});
 let clearTimer;
 $('clearBtn').addEventListener('click', () => { $('clearConfirm').hidden = false; clearTimeout(clearTimer); clearTimer = setTimeout(() => $('clearConfirm').hidden = true, 4000); });
-$('clearConfirm').addEventListener('click', () => { log = []; save(); events = []; saveEvents(); updateSupplyUI(); $('clearConfirm').hidden = true; $('logCount').textContent = '0 readings'; draw(); msg('Log cleared.'); });
+$('clearConfirm').addEventListener('click', () => { log = []; save(); events = []; saveEvents(); updateSupplyUI(); pauses = []; savePauses(); $('clearConfirm').hidden = true; $('logCount').textContent = '0 readings'; draw(); msg('Log cleared.'); });
 
 // ---------- settings ----------
 $('limit').addEventListener('change', e => { const v = parseFloat(e.target.value); if (v > 0) { settings.limit = v; saveSettings(); draw(); } });
